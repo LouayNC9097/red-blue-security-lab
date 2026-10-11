@@ -16,6 +16,7 @@ Every technique is performed against a machine I own, on a network with no route
 ## Table of Contents
 
 - [Overview](#overview)
+- [New to security? Start here](#new-to-security-start-here)
 - [Legal & Ethical Use](#legal--ethical-use)
 - [Lab Architecture](#lab-architecture)
 - [Repository Structure](#repository-structure)
@@ -60,6 +61,49 @@ The guiding idea is simple:
 > **Attack it · Detect it · Fix it · Prove the fix · Write it down.**
 
 A detection you have never watched fire is not a detection — it is a hope. So every offensive step in this README is paired with the exact blue-team evidence it leaves behind.
+
+---
+
+## New to security? Start here
+
+If words like "SIEM", "red team" or "Domain Controller" are new to you, this section gives you just enough to follow everything below. **No prior experience is assumed.**
+
+### The two sides of the lab
+
+- **Red team** — the attackers. They try to break in: find machines, spot weaknesses, steal or guess credentials, and prove they can reach sensitive systems.
+- **Blue team** — the defenders. They watch for those attacks in logs, spot what looks suspicious, and fix the weaknesses so it cannot happen again.
+- **Purple team** — not a third team, just the habit of doing both together: attack, watch how it looks, then improve. That is exactly what this project does.
+
+### Key words used in this README
+
+| Term | Plain meaning |
+|---|---|
+| **Lab** | A private, deliberately vulnerable setup you own, used to practise safely. |
+| **VM (virtual machine)** | A computer that runs inside another computer — here, inside VirtualBox. |
+| **Hypervisor** | The software that runs VMs (VirtualBox, in this lab). |
+| **Host** | The real Windows 11 PC that runs the VMs. |
+| **Endpoint** | Any monitored machine — a server or a workstation. |
+| **SIEM** | Security Information and Event Management: collects logs from machines and raises alerts. Here that system is **Wazuh**. |
+| **SOC** | Security Operations Centre — the team (and screen) where a SIEM is watched. |
+| **Telemetry** | The log and event data machines send to the SIEM. |
+| **Domain Controller (DC)** | The Windows server that manages logins and permissions for a Windows network. |
+| **Active Directory (AD)** | Microsoft's directory service that the DC runs — the "phone book" of users and computers. |
+| **Detection** | A rule or query that turns raw log data into a clear alert. |
+| **Remediation** | The fix applied after a weakness is found. |
+| **Agent** | Small software on an endpoint that ships its logs to the SIEM. |
+
+### What you will learn
+
+Build a monitored lab, attack a Windows domain, watch each attack appear as a Wazuh alert, apply fixes, and re-test to prove the fixes work. In other words, you practise the core loop of a security analyst's day — safely, on machines you own.
+
+### How to use this guide
+
+- Read **Part 1** first; it builds the environment everything else depends on.
+- **Parts 2 → 3 → 4 → 5** form one story: attack it, detect it, fix it, prove the fix. Follow them in order the first time.
+- Stuck on a term or a Windows event ID? Jump to the **Key words** table above, the [Windows Event ID Quick Reference](#windows-event-id-quick-reference), or [Troubleshooting](#troubleshooting).
+- Commands are shown exactly as run, with a short explanation of what each one does and why.
+
+> **Safety first:** everything here runs on **machines I own**, on an isolated network with **no internet access**. See [Legal & Ethical Use](#legal--ethical-use).
 
 ---
 
@@ -190,6 +234,8 @@ red-blue-security-lab/
 ---
 
 ## Part 1 — Build the Lab
+
+> **In plain terms:** stand up the whole lab — create an isolated network, start the Wazuh SIEM server, connect each machine to it, and switch on the Windows logging the rest of the guide relies on.
 
 ### 1.1 VirtualBox network
 
@@ -383,6 +429,8 @@ Then, via Group Policy: **disable LLMNR and NetBIOS over TCP/IP** on all adapter
 
 ## Part 2 — The Penetration Walkthrough
 
+> **In plain terms:** play the attacker. Step by step, find the Windows domain, look for weaknesses, try to obtain credentials, and log in — the way a real intruder would.
+
 > Target: **WinServer DC `10.0.0.10`** (`corp.local`), attacked from **Kali `10.0.0.30`**, watched by **Wazuh on `10.0.0.40`**.
 > **Snapshot the target first.** Every phase: run the red command, then check the blue evidence before continuing.
 
@@ -555,6 +603,8 @@ net user pentest-user /delete
 
 ## Part 3 — Detection (Blue Team)
 
+> **In plain terms:** switch to the defender's chair. Learn which Windows events and Wazuh rules reveal each attack from Part 2, and how to search for them.
+
 ### The detection matrix
 
 | Technique (phase) | Windows Event ID(s) | Wazuh search |
@@ -633,6 +683,8 @@ sudo /var/ossec/bin/agent_control -R 002      # agent 002 = WinServer: refresh c
 
 ## Part 4 — Remediation
 
+> **In plain terms:** fix what you found, then run the attack again to prove the fix actually works.
+
 This is the half that gets paid. Apply each control, then re-run the matching attack and confirm it now fails or is deafening.
 
 | Weakness proven | Fix | Detection to keep |
@@ -654,6 +706,8 @@ This is the half that gets paid. Apply each control, then re-run the matching at
 ---
 
 ## Part 5 — The Red/Blue Loop
+
+> **In plain terms:** the repeatable loop — attack, detect, fix, re-test — that turns practice into a portfolio piece.
 
 The loop that turns study notes into a portfolio artefact:
 
