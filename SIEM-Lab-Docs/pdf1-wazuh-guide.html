@@ -1,0 +1,1392 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Wazuh 4.14.8 Lab Guide</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- ==================== COVER ==================== -->
+<div class="cover">
+  <div>
+    <div class="kicker">SIEM Lab &middot; Volume 1</div>
+    <h1>Using Your Wazuh SIEM</h1>
+    <div class="rule"></div>
+    <h2>A beginner's guide to the Wazuh 4.14.8 stack that is already installed and
+        running in your own VirtualBox lab.</h2>
+    <div class="meta">
+      <table>
+        <tr><td>Written for</td><td>A Linux-only learner building their first SIEM lab</td></tr>
+        <tr><td>Wazuh version</td><td>4.14.8-1 (indexer + manager + dashboard + filebeat)</td></tr>
+        <tr><td>Runs on</td><td>SIEM-Ubuntu &mdash; Ubuntu 26.04.1 LTS, 8 GB RAM, 4 vCPU</td></tr>
+        <tr><td>Lab network</td><td><code>intnet</code> isolated segment, 10.0.0.0/24</td></tr>
+        <tr><td>Already enrolled</td><td>Kali Linux as agent <code>001</code></td></tr>
+        <tr><td>Host</td><td>Windows 11 &middot; VirtualBox 7.2.12 (r174389)</td></tr>
+        <tr><td>Document date</td><td>30 September 2026</td></tr>
+      </table>
+    </div>
+    <div class="note">
+      <strong>Read this first.</strong> Nothing in this guide installs Wazuh &mdash; it is already
+      running and verified. This document is about <em>operating</em> it: what each screen means,
+      how to read an alert, how to investigate an event end to end, and how to write your own
+      detection rules. Every command, URL and password is the real one from your lab, so you can
+      follow along literally. Where a value could differ on your machine, it is marked.
+    </div>
+  </div>
+</div>
+
+<!-- ==================== TOC ==================== -->
+<h1 class="sec nobreak">Contents</h1>
+<div class="toc">
+  <div><span class="n">0</span> How to read this guide</div>
+  <div><span class="n">1</span> What you actually built &mdash; the architecture</div>
+  <div><span class="n">2</span> Reaching every part of Wazuh (URLs, ports, credentials)</div>
+  <div><span class="n">3</span> Concepts you need before touching the UI</div>
+  <div><span class="n">4</span> First login and the dashboard tour</div>
+  <div><span class="n">5</span> The Agents page in depth</div>
+  <div><span class="n">6</span> Alerts &mdash; the core screen</div>
+  <div><span class="n">7</span> A worked investigation, start to finish</div>
+  <div><span class="n">8</span> Vulnerability Detector</div>
+  <div><span class="n">9</span> SCA &mdash; Security Configuration Assessment</div>
+  <div><span class="n">10</span> Compliance dashboards (CIS &amp; PCI&nbsp;DS)</div>
+  <div><span class="n">11</span> File Integrity Monitoring (FIM)</div>
+  <div><span class="n">12</span> Inventory &amp; software inventory</div>
+  <div><span class="n">13</span> Writing your own rules and decoders</div>
+  <div><span class="n">14</span> Manager command-line toolkit</div>
+  <div><span class="n">15</span> Querying Wazuh through the REST API</div>
+  <div><span class="n">16</span> Troubleshooting</div>
+  <div><span class="n">17</span> Maintenance: certs, passwords, backups</div>
+  <div><span class="n">18</span> Lab exercises to work through</div>
+  <div><span class="n">19</span> Where to take this next</div>
+</div>
+
+<!-- ==================== 0 ==================== -->
+<h1 class="sec">0 &nbsp;How to read this guide</h1>
+
+<p class="lead">You said you know Linux but not security operations. That is actually the better
+starting position than most people, because a SIEM is just a Linux service collecting logs &mdash;
+the hard part is mental models, not syntax.</p>
+
+<h2>Conventions used here</h2>
+<table class="d">
+  <tr><th style="width:26%">Format</th><th>Meaning</th></tr>
+  <tr><td><code>like-this</code></td><td>A file, folder, service name, index name or field name</td></tr>
+  <tr><td><code class="kbd">sudo systemctl status wazuh-manager</code></td><td>Something you type in a terminal. Type it exactly, including the sudo.</td></tr>
+  <tr><td>blue-tinted output</td><td>Output the terminal prints back to you. Compare it to what you get.</td></tr>
+  <tr><td><span class="tag t-lo">low</span> <span class="tag t-md">med</span> <span class="tag t-hi">high</span> <span class="tag t-crit">crit</span></td><td>Alert severity, matching Wazuh rule levels 0&ndash;15.</td></tr>
+</table>
+
+<div class="box b-info">
+  <span class="bt">The one habit that will make this whole thing click</span>
+  <p>Every time Wazuh shows you an alert, ask three questions: <strong>which machine</strong>
+  (agent name + IP), <strong>what exactly happened</strong> (rule description), and
+  <strong>how do I prove it</strong> (the raw event fields). A SIEM is only useful if you can
+  get from a coloured badge to the underlying evidence without guessing.</p>
+</div>
+
+<h2>What you need before starting</h2>
+<ul>
+  <li><strong>SIEM-Ubuntu running.</strong> Wazuh stores its data in memory-heavy Java processes.
+  If the VM is paused or suspended, the dashboard will not answer.</li>
+  <li><strong>A way in.</strong> Either the browser on Windows at <code>https://127.0.0.1:4433</code>,
+  or SSH from Windows (<code>ssh -p 2222 ubuntu@127.0.0.1</code>), or the VirtualBox console window.</li>
+  <li><strong>Patience on first open.</strong> The dashboard can take 30&ndash;60 seconds to answer
+  the first time after a cold boot while OpenSearch finishes loading.</li>
+</ul>
+
+<div class="box b-warn">
+  <span class="bt">TLS certificate warning is expected</span>
+  <p>Your dashboard uses a self-signed lab certificate. Your browser will show
+  &ldquo;Your connection is not private&rdquo;. This is <strong>correct and not a problem</strong> &mdash;
+  the certificate was issued by your own lab root CA. Click <em>Advanced</em> &rarr; <em>Proceed
+  to 127.0.0.1 (unsafe)</em>. Do not do that on any other site.</p>
+</div>
+
+<!-- ==================== 1 ==================== -->
+<h1 class="sec">1 &nbsp;What you actually built &mdash; the architecture</h1>
+
+<p class="lead">Before any UI, you need the picture. Wazuh is not one program. You installed five
+moving parts, and understanding which part does what is what separates people who can operate a
+SIEM from people who can only click.</p>
+
+<h2>1.1 The five components</h2>
+
+<table class="d wrap">
+  <tr><th style="width:20%">Component</th><th style="width:11%">Port</th><th>Job, in plain English</th></tr>
+  <tr>
+    <td><strong>Wazuh agent</strong></td><td class="c">&mdash;</td>
+    <td>A small program installed on every machine you want to watch. It reads local log files,
+        runs security checks, and ships the interesting events to the manager. This is the only
+        part that touches your monitored machines.</td>
+  </tr>
+  <tr>
+    <td><strong>Wazuh manager</strong><br><span class="tag t-neu">the brain</span></td><td class="c">1514<br>1515</td>
+    <td>Runs on SIEM-Ubuntu. Does three things: (1) receives events from agents on 1514, (2) applies
+        thousands of <em>rules</em> that decide whether an event is noise or an alert, and (3) runs
+        its own modules &mdash; vulnerability scanning, configuration auditing, file integrity monitoring,
+        log collection. Port 1515 is the enrolment port agents use to register themselves.</td>
+  </tr>
+  <tr>
+    <td><strong>Wazuh indexer</strong><br><span class="tag t-neu">the filing cabinet</span></td><td class="c">9200</td>
+    <td>A rebranded OpenSearch 7.10.2 cluster. Everything searchable is written here as a document
+        with JSON fields. This is where the dashboard reads from. It is the memory hog &mdash; which is
+        why you set the heap to 2&nbsp;GB in <code>/etc/default/wazuh-indexer</code>.</td>
+  </tr>
+  <tr>
+    <td><strong>Filebeat</strong><br><span class="tag t-neu">the courier</span></td><td class="c">&mdash;</td>
+    <td>Beats version 7.10.2 from Elastic. Its only job in your setup is to read
+        <code>/var/ossec/logs/alerts/alerts.json</code> and push it into the indexer. The manager
+        writes its alerts to a file; Filebeat ships that file.</td>
+  </tr>
+  <tr>
+    <td><strong>Wazuh dashboard</strong></td><td class="c">443</td>
+    <td>OpenSearch Dashboards, TLS on 443. The web UI. It never talks to the manager directly for
+        alerts &mdash; it queries the indexer. It authenticates against the manager API on
+        port&nbsp;55000 as user <code>wazuh-wui</code>.</td>
+  </tr>
+</table>
+
+<div class="box b-info">
+  <span class="bt">The single most useful sentence in this document</span>
+  <p><strong>Agent &rarr; manager &rarr; (rules) &rarr; alerts.json &rarr; Filebeat &rarr; indexer
+  &rarr; dashboard.</strong> When something does not show up in the UI, you debug along that arrow.
+  If a login event never appears, is the agent alive? If the agent is alive but no alert, is the
+  rule firing? If an alert is in <code>alerts.json</code> but not in the UI, it is a Filebeat or
+  indexer problem.</p>
+</div>
+
+<h2>1.2 What is running, right now, on SIEM-Ubuntu</h2>
+
+<p>This is the verified state from the install. Confirm it any time with one command:</p>
+
+<pre>sudo systemctl status wazuh-manager wazuh-indexer wazuh-dashboard filebeat <span class="prm">--no-pager</span></pre>
+
+<table class="d">
+  <tr><th style="width:34%">Service</th><th style="width:14%">Memory</th><th>Notes</th></tr>
+  <tr><td><code>wazuh-manager</code></td><td class="mono">&mdash;</td><td>Core daemons: <code>wazuh-analysisd</code>, <code>wazuh-remoted</code>, <code>wazuh-logcollector</code>, <code>wazuh-execd</code>, <code>wazuh-integratord</code>, <code>wazuh-authd</code></td></tr>
+  <tr><td><code>wazuh-indexer</code></td><td class="mono">heap 2&nbsp;GB</td><td>Node <code>node-1</code>, cluster green, 21 shards</td></tr>
+  <tr><td><code>wazuh-dashboard</code></td><td class="mono">&mdash;</td><td>TLS on 443, certs owned by user <code>wazuh-dashboard</code></td></tr>
+  <tr><td><code>filebeat</code></td><td class="mono">&mdash;</td><td>wazuh module 0.1 loaded</td></tr>
+</table>
+
+<h2>1.3 Your lab topology</h2>
+
+<p>This is the network you fixed and verified. Keep it in your head &mdash; almost every problem in
+Part&nbsp;16 of this guide is caused by mixing up these two segments.</p>
+
+<div class="flow">
+  <span class="n">Kali 10.0.0.30</span><span class="ar">&rarr;</span>
+  <span class="n">SIEM-Ubuntu 10.0.0.40</span><span class="ar">&rarr;</span>
+  <span class="n">WinServer 10.0.0.50</span>
+  <div style="font-size:8.4pt;color:#6b7c8d;margin-top:3mm">
+    VirtualBox <code>intnet</code> &mdash; VM&#8209;to&#8209;VM only. No gateway, no internet, invisible to Windows.
+  </div>
+  <div style="font-size:8.4pt;color:#6b7c8d;margin-top:2mm">
+    Separately, each VM has its own NAT adapter on 10.0.3.0/24 for internet. NAT guests
+    <em>cannot</em> see each other on that segment &mdash; by design.
+  </div>
+</div>
+
+<table class="d">
+  <tr><th>Machine</th><th class="c">Lab IP (intnet)</th><th class="c">NAT IP</th><th class="c">RAM</th><th>Wazuh role</th></tr>
+  <tr><td><strong>SIEM-Ubuntu</strong></td><td class="mono c">10.0.0.40</td><td class="mono c">10.0.3.15</td><td class="c">8 GB</td><td>Server: manager, indexer, dashboard, filebeat</td></tr>
+  <tr><td><strong>Kali</strong></td><td class="mono c">10.0.0.30</td><td class="mono c">10.0.3.20</td><td class="c">4 GB</td><td>Agent <code>001</code> &mdash; active</td></tr>
+  <tr><td><strong>WinServer</strong></td><td class="mono c">10.0.0.50 <span class="tag t-neu">planned</span></td><td class="mono c">none yet</td><td class="c">4 GB</td><td>Windows Server 2022 &mdash; not enrolled yet (see Volume&nbsp;2)</td></tr>
+  <tr><td><strong>WindowsClient</strong></td><td class="mono c">planned</td><td class="mono c">none yet</td><td class="c">&mdash;</td><td>Workstation &mdash; not enrolled yet</td></tr>
+</table>
+
+<div class="box b-warn">
+  <span class="bt">Why agents must reach the manager on the lab IP</span>
+  <p>The manager listens on port 1514 on <em>all</em> its interfaces, so an agent can connect to
+  <code>10.0.0.40</code> (lab net, works) or <code>10.0.3.15</code> (NAT, also works for a single
+  guest). But Kali cannot ARP-reach Ubuntu on the NAT segment &mdash; that isolation is built into
+  VirtualBox. Your Kali agent is enrolled against <code>10.0.0.40</code> for exactly this reason.
+  Always enrol agents using the <strong>intnet</strong> address of SIEM-Ubuntu.</p>
+</div>
+
+<!-- ==================== 2 ==================== -->
+<h1 class="sec">2 &nbsp;Reaching every part of Wazuh</h1>
+
+<p class="lead">There are four URLs and three credential pairs. Mixing them up is the single most
+common beginner error, so this is a table worth memorising.</p>
+
+<h2>2.1 The URLs</h2>
+
+<table class="d">
+  <tr><th style="width:30%">What</th><th style="width:34%">From Windows (browser)</th><th>Notes</th></tr>
+  <tr>
+    <td><strong>Dashboard</strong><br>(use this one)</td>
+    <td class="mono">https://127.0.0.1:4433</td>
+    <td>Host port forward &rarr; VM port 443. This is your main UI.</td>
+  </tr>
+  <tr>
+    <td>Dashboard (alternate)</td>
+    <td class="mono">https://127.0.0.1:443</td>
+    <td><strong>Only from inside the VM</strong> &mdash; there is no host forward on 443.
+        Use <code>ssh -p 2222 ubuntu@127.0.0.1</code> and open it there.</td>
+  </tr>
+  <tr>
+    <td>Indexer API</td>
+    <td class="mono">https://127.0.0.1:9200</td>
+    <td>Raw OpenSearch JSON. Forward is <em>not</em> configured &mdash; this only works if you
+        are inside the VM, or you add a forward.</td>
+  </tr>
+  <tr>
+    <td>Manager API</td>
+    <td class="mono">https://127.0.0.1:55000</td>
+    <td>REST API for agents, rules, SCA. Also not forwarded. See Part&nbsp;15 for using it via SSH.</td>
+  </tr>
+</table>
+
+<h3>Adding a forward so you can reach the indexer from Windows</h3>
+
+<p>Worth doing once &mdash; it lets you query raw alerts with <code>curl</code> from PowerShell,
+which is invaluable when learning. The VM must be powered off for this command.</p>
+
+<pre>VBoxManage modifyvm "SIEM-Ubuntu" --natpf2 delete indexer-api
+VBoxManage modifyvm "SIEM-Ubuntu" --natpf2 <span class="prm">"indexer-api,tcp,127.0.0.1,9200,10.0.3.15,9200"</span>
+VBoxManage modifyvm "SIEM-Ubuntu" --natpf2 <span class="prm">"manager-api,tcp,127.0.0.1,55000,10.0.3.15,55000"</span>
+VBoxManage startvm "SIEM-Ubuntu" --type headless</pre>
+
+<p class="tcap">Then from PowerShell. Note <code>-k</code> &mdash; the certificate is self-signed.</p>
+
+<pre>curl.exe -k -u <span class="prm">admin:&lt;MANAGER_PASSWORD&gt;</span> https://127.0.0.1:9200/_cluster/health?pretty</pre>
+
+<h2>2.2 The credentials</h2>
+
+<table class="d">
+  <tr><th style="width:26%">Service</th><th style="width:22%">Username</th><th>Password</th></tr>
+  <tr><td>Dashboard login</td><td class="mono">admin</td><td class="mono">&lt;MANAGER_PASSWORD&gt;</td></tr>
+  <tr><td>Manager API (what the dashboard uses)</td><td class="mono">wazuh-wui</td><td class="mono">wazuh-wui</td></tr>
+  <tr><td>Indexer API</td><td class="mono">admin</td><td class="same">same as dashboard admin</td></tr>
+  <tr><td>SSH into the VM</td><td class="mono">ubuntu</td><td class="mono">ubuntu</td></tr>
+  <tr><td>SSH into Kali</td><td class="mono">kali</td><td class="mono">kali</td></tr>
+</table>
+
+<div class="box b-bad">
+  <span class="bt">Change all of these before this lab ever touches a real network</span>
+  <p>These are lab-grade passwords written into a report. The port forwards bind to
+  <code>127.0.0.1</code> only, so they are not exposed to your LAN &mdash; but a NAT forward still
+  receives connections from anything VirtualBox thinks is local. Treat them as public.
+  Part&nbsp;17 shows how to rotate the dashboard and API passwords properly.</p>
+</div>
+
+<h2>2.3 SSH access from Windows</h2>
+
+<p>From PowerShell, using the forwards that already exist:</p>
+
+<pre>ssh -p <span class="prm">2222</span> ubuntu@127.0.0.1     <span class="cmt"># SIEM-Ubuntu  (works)</span>
+ssh -p <span class="prm">2223</span> kali@127.0.0.1       <span class="cmt"># Kali        (needs the power-cycle fix, Part 16.4)</span></pre>
+
+<p>And from inside SIEM-Ubuntu to Kali, which always works:</p>
+
+<pre>ssh kali@10.0.0.30</pre>
+
+<div class="box b-info">
+  <span class="bt">Your emergency channel if SSH is broken</span>
+  <p>Every VM with Guest Additions installed has an out-of-band command channel that needs neither
+  SSH nor working networking. It is how the whole lab was fixed yesterday. Run from Windows:</p>
+<pre>VBoxManage guestcontrol "SIEM-Ubuntu" run --username ubuntu --password ubuntu --exe "/bin/bash" -- -c "<span class="prm">your-command-here</span>"</pre>
+  <p style="margin-top:2mm">Keep this in your back pocket. It is also why you should never leave a
+  VM suspended instead of shut down when doing network work.</p>
+</div>
+
+<!-- ==================== 3 ==================== -->
+<h1 class="sec">3 &nbsp;Concepts you need before touching the UI</h1>
+
+<h2>3.1 SIEM, EDR, NDR &mdash; what the differences mean</h2>
+
+<table class="d">
+  <tr><th style="width:16%">Type</th><th style="width:22%">Where it watches</th><th>Example</th></tr>
+  <tr><td><strong>SIEM</strong></td><td>Log data from many sources</td><td><strong>Wazuh</strong> &mdash; aggregates logs from servers, network gear, apps, cloud</td></tr>
+  <tr><td><strong>EDR</strong></td><td>Endpoint, kernel-level</td><td>Microsoft Defender for Endpoint, CrowdStrike</td></tr>
+  <tr><td><strong>NDR</strong></td><td>Network packets, passively</td><td>Suricata &mdash; <em>see Part 19, this pairs perfectly with Wazuh</em></td></tr>
+  <tr><td><strong>AV</strong></td><td>Endpoint, signature-based</td><td>Classic antivirus</td></tr>
+</table>
+
+<p>Wazuh is primarily a <strong>SIEM</strong>, but its agent also does endpoint work (FIM, SCA,
+Syscollector), so it is a small EDR too. It is <em>not</em> a network sensor &mdash; it sees
+connections because agents report them, not because it sniffs packets.</p>
+
+<h2>3.2 Alerts, events, rules, decoders &mdash; the four words you will see everywhere</h2>
+
+<table class="d wrap">
+  <tr><th style="width:16%">Word</th><th>Definition and a Linux analogy</th></tr>
+  <tr>
+    <td><strong>Event</strong></td>
+    <td>A single log line. <span class="tag t-neu">grep</span> finds events. There are millions.</td>
+  </tr>
+  <tr>
+    <td><strong>Decoder</strong></td>
+    <td>The parser that turns a raw log line into structured JSON fields.
+        <span class="tag t-neu">analogy</span> a regex or an awk field extractor. Windows Event Log
+        lines like <code>4624</code> carry almost nothing usable until decoded.</td>
+  </tr>
+  <tr>
+    <td><strong>Rule</strong></td>
+    <td>A pattern plus a decision. If a decoded event matches, the rule assigns a
+        <strong>level</strong> (severity), a description, and optionally a MITRE ATT&amp;CK tag.
+        <span class="tag t-neu">analogy</span> a <code>grep</code> pattern with an action attached.</td>
+  </tr>
+  <tr>
+    <td><strong>Alert</strong></td>
+    <td>An event that a rule matched and that Wazuh decided was worth a human's attention.
+        If no rule matched, the event is stored but is <em>not</em> an alert &mdash; this is exactly
+        why an alert's absence does not prove an attack did not happen.</td>
+  </tr>
+</table>
+
+<h3>Where the rules live</h3>
+<pre>/var/ossec/etc/shared/       <span class="cmt"># shipped rules + decoders, ~3,000 XML files. Do not edit.</span>
+/var/ossec/etc/local_rules.xml <span class="cmt"># YOUR rules. Read AFTER shared, so you win.</span>
+/var/ossec/etc/local_decoder.xml <span class="cmt"># YOUR custom decoders.</span></pre>
+
+<h2>3.3 Severity: rule levels 0&ndash;15</h2>
+
+<table class="d">
+  <tr><th style="width:22%">Level</th><th style="width:22%">Dashboard tag</th><th>Meaning</th></tr>
+  <tr><td class="mono">0 &ndash; 3</td><td><span class="tag t-lo">low</span></td><td>Informational. Usually not enabled by default. Not actionable.</td></tr>
+  <tr><td class="mono">4 &ndash; 7</td><td><span class="tag t-md">med</span></td><td>Worth knowing about. Tune or acknowledge.</td></tr>
+  <tr><td class="mono">8 &ndash; 11</td><td><span class="tag t-hi">high</span></td><td>Investigate. This is where real incidents live.</td></tr>
+  <tr><td class="mono">12 &ndash; 15</td><td><span class="tag t-crit">crit</span></td><td>Respond now.</td></tr>
+</table>
+
+<div class="box b-warn">
+  <span class="bt">Alert fatigue is the enemy of detection</span>
+  <p>If everything is critical, nothing is. A mature workflow is: start at level&nbsp;8+, work down
+  until you understand the noise, then write <em>suppression</em> rules for the boring parts. Part&nbsp;13
+  shows how. Never widen the net the other way.</p>
+</div>
+
+<h2>3.4 MITRE ATT&amp;CK</h2>
+<p>ATT&amp;CK is a public catalogue of attacker tactics, written as <code>Tactic/Technique</code>
+pairs &mdash; for example <code>TA0001/T1078</code> Valid Accounts, or
+<code>TA0002/T1059.001</code> Execution / PowerShell. Wazuh tags many of its rules with these, which
+lets you pivot: given an alert, go to the technique and read what a real intrusion using it looks
+like. You can filter the alerts screen by technique, which is the fastest way to spot a pattern
+rather than reading alerts one at a time.</p>
+
+<h2>3.5 The alert lifecycle in your lab</h2>
+<div class="flow">
+  <span class="n">Kali writes a log</span><span class="ar">&rarr;</span>
+  <span class="n">agent ships to :1514</span><span class="ar">&rarr;</span>
+  <span class="n">manager decodes + matches rules</span><span class="ar">&rarr;</span>
+  <span class="n">writes alerts.json</span><span class="ar">&rarr;</span>
+  <span class="n">Filebeat → indexer</span><span class="ar">&rarr;</span>
+  <span class="n">dashboard renders</span>
+</div>
+<p class="noimg">Debug failures along this arrow in order. It saves hours.</p>
+
+<!-- ==================== 4 ==================== -->
+<h1 class="sec">4 &nbsp;First login and the dashboard tour</h1>
+
+<div class="step"><span class="sn">STEP 1</span><span class="st">Start SIEM-Ubuntu and wait</span>
+<p>Boot it in VirtualBox. The indexer needs 1&ndash;2 minutes to form its cluster. Watch it with a
+loop in the SSH session so you know the moment it is ready:</p>
+<pre>watch -n5 "systemctl is-active wazuh-indexer wazuh-manager wazuh-dashboard filebeat | tr '\n' ' '; echo"</pre>
+<p>Wait until all four print <code class="out">active</code>. Only then open the browser.</p>
+</div>
+
+<div class="step"><span class="sn">STEP 2</span><span class="st">Open the dashboard</span>
+<p>Go to <code>https://127.0.0.1:4433</code>. Accept the certificate warning. Log in as
+<code>admin</code> with the password from section 2.2.</p>
+</div>
+
+<div class="step"><span class="sn">STEP 3</span><span class="st">Understand the left navigation</span>
+<table class="d">
+  <tr><th style="width:26%">Item</th><th>What it is for</th></tr>
+  <tr><td><strong>Overview</strong></td><td>Health summary: alerts by severity, agents online, top talkers. Your landing page.</td></tr>
+  <tr><td><strong>Agents</strong></td><td>Every machine being monitored, its status, its configuration. Part&nbsp;5.</td></tr>
+  <tr><td><strong>Alerts</strong></td><td>The main event stream, filterable. Part&nbsp;6 and 7.</td></tr>
+  <tr><td><strong>Vulnerability</strong></td><td>CVE findings per asset from the scanner. Part&nbsp;8.</td></tr>
+  <tr><td><strong>System Audit</strong></td><td>CIS benchmark results per agent (the SCA module). Part&nbsp;9.</td></tr>
+  <tr><td><strong>Compliance</strong></td><td>Pre-built CIS and PCI&nbsp;DSS dashboards. Part&nbsp;10.</td></tr>
+  <tr><td><strong>FIM</strong></td><td>File Integrity Monitoring &mdash; who changed which file. Part&nbsp;11.</td></tr>
+  <tr><td><strong>Inventory</strong></td><td>Hardware, OS, packages, applications. Part&nbsp;12.</td></tr>
+  <tr><td><strong>Dev Tools</strong></td><td>Browse and edit rules, decoders and SCA policies. Part&nbsp;13.</td></tr>
+</table>
+</div>
+
+<div class="step"><span class="sn">STEP 4</span><span class="st">Read the Overview page properly</span>
+<p>Three widgets matter on day one:</p>
+<ul>
+  <li><strong>Alerts by severity</strong> &mdash; the coloured bar. Yours will be low-to-medium and
+  dominated by routine sudo/sshd noise. That is normal and healthy.</li>
+  <li><strong>Agents online / never connected / disconnected</strong> &mdash; you should see
+  <em>1 online</em> (Kali, <code>001</code>).</li>
+  <li><strong>Latest alerts</strong> &mdash; the live tail. Leave it open; it is the fastest way to
+  confirm an agent is actually shipping.</li>
+</ul>
+</div>
+
+<div class="box b-info">
+  <span class="bt">Your baseline, so you can tell later if something changed</span>
+  <p>738 alerts were indexed on the install day: <strong>521 from SIEM-Ubuntu, 217 from Kali</strong>.
+  Most are <code>sudo</code> commands, SSH sessions, and PAM events. Write this number down. When
+  you start the Volume&nbsp;2 Windows Server work, "the alert count went from 738 to 4000" will mean
+  something specific, and "it went down" would be worth investigating too.</p>
+</div>
+
+<!-- ==================== 5 ==================== -->
+<h1 class="sec">5 &nbsp;The Agents page in depth</h1>
+
+<p class="lead">An agent is a monitored machine. This page is how you add them, and it is also your
+first health check: if a machine is not here and not <em>active</em>, it is not sending anything.</p>
+
+<h2>5.1 Reading the agent list</h2>
+
+<p>Go to <strong>Agents</strong>. You have exactly one row. The columns that will matter to you:</p>
+
+<table class="d">
+  <tr><th style="width:24%">Column</th><th>What it tells you</th></tr>
+  <tr><td><strong>Name</strong></td><td>What you typed at enrolment. Use meaningful names &mdash; <code>WINSRV-DC01</code>, not <code>DESKTOP-9F3K2</code>. You will type this name hundreds of times.</td></tr>
+  <tr><td><strong>Status</strong></td><td><span class="tag t-ok">Active</span> means it checked in within the keep-alive window. <span class="tag t-md">Pending</span> = enrolled, never connected. <span class="tag t-crit">Never connected</span> = enrolment worked, agent never started. <span class="tag t-neu">Disconnected</span> = was working, now isn't &mdash; the useful one.</td></tr>
+  <tr><td><strong>Last keep alive</strong></td><td>The heartbeat. Default window is 15 minutes. A healthy agent updates every ~10 s, so this reading should be seconds old, not minutes.</td></tr>
+  <tr><td><strong>Groups</strong></td><td>Logical buckets you assign. The main way to scope a search to "my servers".</td></tr>
+  <tr><td><strong>Labels</strong></td><td>Key=value tags for filtering. The cleaner way to handle "which OS is this" or "is this a database box".</td></tr>
+</table>
+
+<h2>5.2 Agent status reference</h2>
+<table class="d">
+  <tr><th style="width:22%">Status</th><th>What happened, and what to do</th></tr>
+  <tr><td><span class="tag t-ok">Active</span></td><td>Working. Do nothing.</td></tr>
+  <tr><td><span class="tag t-md">Pending</span></td><td>The manager knows about it but the agent has never connected. The enrolment command was never run on the target, or it ran with the wrong manager IP. Fix: run the command.</td></tr>
+  <tr><td><span class="tag t-neu">Disconnected</span></td><td>Worked, then stopped. Check: is the VM powered on? Is it on the same intnet segment? Can it reach port 1514?</td></tr>
+  <tr><td><span class="tag t-crit">Never connected</span></td><td>See Pending, but check the key mismatch too. A different key between enrolment and the running agent config is the usual cause.</td></tr>
+</table>
+
+<h2>5.3 Adding an agent &mdash; Linux, the correct way for your lab</h2>
+
+<div class="step"><span class="sn">STEP 1</span><span class="st">Open the Add agent form</span>
+<p><strong>Agents</strong> &rarr; <strong>Add agent</strong>. Choose <strong>Linux</strong>.
+This page also generates the command; copy it before you leave.</p>
+</div>
+
+<div class="step"><span class="sn">STEP 2</span><span class="st">Fill in the form</span>
+<ul>
+  <li><strong>Name</strong> &mdash; your chosen name, e.g. <code>ubuntu-server</code>. Must be unique.</li>
+  <li><strong>IP / CIDR</strong> &mdash; <code>10.0.0.50/24</code> for a lab VM. Use <code>any</code>
+      for machines that roam between networks.</li>
+  <li><strong>Tags</strong> &mdash; optional but worth it now: <code>os.linux,role.server,env.lab</code>.</li>
+</ul>
+</div>
+
+<div class="step"><span class="sn">STEP 3</span><span class="st">Copy the generated command</span>
+<p>It looks like this. <strong>The key is unique to this agent</strong> &mdash; never reuse one, and
+never paste your manager's key into an agent config by accident:</p>
+<pre>WAZUH_MANAGER='10.0.0.40' WAZUH_AGENT_NAME='ubuntu-server' WAZUH_AGENT_GROUP='servers' \
+  curl -s https://packages.wazuh.com/4.x/apt/pool/main/w/wazuh-agent/wazuh-agent_4.14.8-1_amd64.deb \
+  | sudo WAZUH_MANAGER='10.0.0.40' WAZUH_AGENT_NAME='ubuntu-server' WAZUH_AGENT_GROUP='servers' \
+    dpkg --install</pre>
+<div class="box b-warn" style="margin-top:2mm">
+  <span class="bt">Use a lab IP, not a NAT IP</span>
+  <p>Fill the manager IP as <code>10.0.0.40</code>. If you put <code>10.0.3.15</code> it will work
+  from some VMs and silently fail from others, because NAT guests cannot reach each other.
+  This is the mistake you already paid for once with the duplicate 10.0.3.15 address.</p>
+</div>
+</div>
+
+<div class="step"><span class="sn">STEP 4</span><span class="st">Run it on the target and start the agent</span>
+<pre>sudo systemctl daemon-reload
+sudo systemctl enable --now wazuh-agent
+sudo systemctl status wazuh-agent <span class="cmt"># expect: active (running)</span></pre>
+</div>
+
+<div class="step"><span class="sn">STEP 5</span><span class="st">Verify it actually reports</span>
+<pre>grep <span class="prm">"Successfully added agent" </span>/var/log/wazuh-agent/wazuh-agent.log | tail -3
+sudo /var/ossec/bin/agent_control -l <span class="cmt"># on the manager, lists live agents</span></pre>
+<p>Then refresh the Agents page in the browser. Status should be <span class="tag t-ok">Active</span>
+within about 30 seconds.</p>
+</div>
+
+<h2>5.4 Enrolling a Windows machine</h2>
+
+<p>The UI picks this up automatically &mdash; choose <strong>Windows</strong> on the Add agent page
+and you get a PowerShell one-liner instead of a Debian package. It is covered in full, with all
+three network options, in <strong>Volume 2</strong>. The short version:</p>
+
+<pre>Invoke-WebRequest -Uri https://packages.wazuh.com/4.x/windows/wazuh-agent-4.14.8-1.msi `
+  -OutFile $env:USERPROFILE\Downloads\wazuh-agent.msi
+msiexec.exe /i $env:USERPROFILE\Downloads\wazuh-agent.msi /q `
+  WAZUH_MANAGER="10.0.0.40" WAZUH_AGENT_NAME="winsrv-01" WAZUH_AGENT_GROUP="windows,servers"</pre>
+
+<div class="box b-info">
+  <span class="bt">Groups versus labels &mdash; pick one and be consistent</span>
+  <p><strong>Groups</strong> are enforced on the manager: an agent's configuration is assembled from
+  the groups it belongs to. Use them for "these all get this hardening". <strong>Labels</strong> are
+  free-form metadata for filtering. Use them for "this is a database". Mixing the two up is a very
+  common and very confusing beginner bug.</p>
+</div>
+
+<h2>5.5 Agent management, in one table</h2>
+<table class="d">
+  <tr><th style="width:44%">Task</th><th>How</th></tr>
+  <tr><td>See a live heartbeat</td><td>Agents &rarr; your agent &rarr; the status dot, or <code>agent_control -l</code></td></tr>
+  <tr><td>Force a config re-read</td><td><code>sudo /var/ossec/bin/agent_control -R &lt;ID&gt;</code> then <code>-i &lt;ID&gt;</code></td></tr>
+  <tr><td>Delete an agent</td><td>Agents &rarr; row &rarr; &hellip; &rarr; Delete. Removes its history.</td></tr>
+  <tr><td>Bulk-import many</td><td>Agents &rarr; <em>Add agent</em> &rarr; <strong>Using a file</strong> tab. Fastest path when you add 10 Windows hosts.</td></tr>
+  <tr><td>Restart the agent remotely</td><td>Agent &rarr; <em>Restart</em> in the UI, or REST <code>PUT /agents/{id}/restart</code></td></tr>
+  <tr><td>Reset a forgotten key</td><td>Agents &rarr; <em>Reset key</em>. Reinstall on the target with the new key.</td></tr>
+</table>
+
+<!-- ==================== 6 ==================== -->
+<h1 class="sec">6 &nbsp;Alerts &mdash; the core screen</h1>
+
+<p class="lead">This is where you spend your working life. Ninety percent of SIEM skill is getting
+good at this one screen.</p>
+
+<h2>6.1 The default view, column by column</h2>
+<table class="d wrap">
+  <tr><th style="width:20%">Column</th><th>Read it like this</th></tr>
+  <tr><td><strong>Timestamp</strong></td><td>When Wazuh processed it, in the dashboard's timezone. Set your timezone deliberately in Settings &rarr; General, or you will misread incidents later.</td></tr>
+  <tr><td><strong>Agent</strong></td><td>Which machine. Filter on this constantly.</td></tr>
+  <tr><td><strong>Location</strong></td><td>Data source &mdash; <code>/var/log/auth.log</code>, <code>syscheck</code>, <code>sca</code>, <code>vuln-detector</code>, <code>win_eventchannel</code>. Tells you which module raised it.</td></tr>
+  <tr><td><strong>Rule description</strong></td><td>Plain-English summary. This is the decoded meaning, not the raw log.</td></tr>
+  <tr><td><strong>Level</strong></td><td>0&ndash;15 as a badge. Sort by it.</td></tr>
+  <tr><td><strong>Rule ID</strong></td><td>The ID of the rule that fired. Memorise the handful you see daily. Searchable in Dev&nbsp;Tools.</td></tr>
+  <tr><td><strong>MITRE</strong></td><td>Tactic/technique tags, when the rule has them. Click to pivot.</td></tr>
+</table>
+
+<h2>6.2 Filtering &mdash; the actual skill</h2>
+
+<p>Use the search bar across the top. It accepts Lucene syntax, which is far more powerful than it
+looks. Click <strong>Add filter</strong> to build conditions with dropdowns if you prefer.</p>
+
+<table class="d wrap">
+  <tr><th style="width:56%">Query</th><th>What it returns</th></tr>
+  <tr><td class="mono">rule.level:&gt;=10</td><td>High and critical only. Your daily triage starting point.</td></tr>
+  <tr><td class="mono">agent.name:"kali-linux-2026.2-virtualbox-amd64"</td><td>Everything from Kali alone.</td></tr>
+  <tr><td class="mono">rule.level:&gt;=8 AND agent.name:"winsrv-01"</td><td>High alerts on one machine. <strong>AND</strong> must be uppercase.</td></tr>
+  <tr><td class="mono">rule.groups:authentication_failed</td><td>Failed logons, by Wazuh's own taxonomy rather than raw IDs.</td></tr>
+  <tr><td class="mono">rule.id:5712</td><td>Every alert from one specific rule.</td></tr>
+  <tr><td class="mono">data.win.system.eventID:4625</td><td>Raw Windows event ID. Your main tool once Windows is enrolled.</td></tr>
+  <tr><td class="mono">rule.mitre.id:T1078</td><td>Anything ATT&amp;CK-tagged as Valid Accounts.</td></tr>
+  <tr><td class="mono">location:"vuln-detector"</td><td>Findings from the vulnerability scanner only.</td></tr>
+  <tr><td class="mono">NOT rule.level:&lt;8 AND agent.name:"kali"</td><td>Suppress the low-level noise to see what is left.</td></tr>
+  <tr><td class="mono">timestamp:[now-24h TO now]</td><td>Last 24 hours.</td></tr>
+</table>
+
+<div class="box b-info">
+  <span class="bt">Save your searches</span>
+  <p>Once a query earns its keep, click the bookmark icon and give it a real name like
+  <code>kali-high-critical</code>. Saved searches appear in the left rail. This is the difference
+  between a SIEM you use and a SIEM you admire. Build 4&ndash;6 of them in your first week and
+  they become your whole workflow.</p>
+</div>
+
+<h2>6.3 Reading one alert in detail</h2>
+
+<p>Click any alert row. It expands into three tabs. The one that matters most is <strong>Full event</strong>,
+which is the decoded JSON. A realistic Linux example:</p>
+
+<pre>{
+  <span class="prm">"timestamp"</span>: "2026-09-30T01:44:12.330+0000",
+  <span class="prm">"agent"</span>: { <span class="prm">"name"</span>: "kali-linux-2026.2-virtualbox-amd64", <span class="prm">"ip"</span>: "10.0.0.30" },
+  <span class="prm">"rule"</span>: {
+    <span class="prm">"level"</span>: 5, <span class="prm">"id"</span>: "5712",
+    <span class="prm">"description"</span>: "sshd: Authentication failed.",
+    <span class="prm">"groups"</span>: ["sshd", "authentication_failed"],
+    <span class="prm">"mitre"</span>: [{ <span class="prm">"technique"</span>: "T1110", <span class="prm">"tactic"</span>: "Credential Access" }]
+  },
+  <span class="prm">"data"</span>: {
+    <span class="prm">"srcip"</span>: "10.0.0.40",
+    <span class="prm">"srcuser"</span>: "ubuntu",
+    <span class="prm">"id"</span>: "21001",
+    <span class="prm">"dstuser"</span>: "root"
+  },
+  <span class="prm">"location"</span>: "/var/log/auth.log",
+  <span class="prm">"decoder"</span>: "sshd",
+  <span class="prm">"predecoder"</span>: { <span class="prm">"program_name"</span>: "sshd" }
+}</pre>
+
+<table class="d">
+  <tr><th style="width:22%">Field</th><th>How to use it</th></tr>
+  <tr><td class="mono">rule.id</td><td>Your search key. Look it up in Dev Tools &rarr; Rules.</td></tr>
+  <tr><td class="mono">rule.level</td><td>Severity. Filter on it first, every time.</td></tr>
+  <tr><td class="mono">data.srcip</td><td>Source IP. On your lab, <code>10.0.0.x</code> means another VM; <code>127.0.0.1</code> or absent means local.</td></tr>
+  <tr><td class="mono">data.srcuser</td><td>Account involved. <code>root</code> appearing at all is worth a look.</td></tr>
+  <tr><td class="mono">data.id</td><td>Wazuh's internal decoder ID. Groups related events into one family.</td></tr>
+  <tr><td class="mono">decoder</td><td>Which parser matched. Tells you which rule family to look at.</td></tr>
+</table>
+
+<!-- ==================== 7 ==================== -->
+<h1 class="sec">7 &nbsp;A worked investigation, start to finish</h1>
+
+<p class="lead">Reading alerts is passive. Investigating is the actual job. Here is a complete
+example on your own lab, using only things you have.</p>
+
+<div class="step"><span class="sn">1</span><span class="st">Notice</span>
+<p>On the Overview page the alert count is climbing and you keep seeing
+<span class="tag t-md">medium</span> badges in the latest-alerts feed. Nothing critical.</p>
+<p><em>The lesson: a low-level alert nobody reads is how real intrusions get missed.</em></p>
+</div>
+
+<div class="step"><span class="sn">2</span><span class="st">Triage &mdash; filter down, do not read everything</span>
+<pre>rule.level:&gt;=8 AND agent.name:"kali-linux-2026.2-virtualbox-amd64"</pre>
+<p>Empty. Good &mdash; so the problem is not something urgent. Now drop the level:</p>
+<pre>rule.level:&gt;=5 AND rule.groups:authentication_failed AND agent.name:"kali-linux-2026.2-virtualbox-amd64"</pre>
+<p>Now you have 40-odd rows instead of 400.</p>
+</div>
+
+<div class="step"><span class="sn">3</span><span class="st">Group by source IP</span>
+<p>Look at the <code>data.srcip</code> column across those rows. One value dominates. In your case it
+will be <code>10.0.0.40</code> &mdash; SIEM-Ubuntu. Now you have a hypothesis to test, not a
+vague worry.</p>
+</div>
+
+<div class="step"><span class="sn">4</span><span class="st">Form and test the hypothesis</span>
+<p><em>Hypothesis: something on SIEM-Ubuntu is repeatedly attempting to authenticate to Kali and
+failing.</em></p>
+<p>Test it against the source rather than the destination. Switch to SIEM-Ubuntu, open a
+<code>sudo</code> shell, and look at what is actually trying:</p>
+<pre>sudo journalctl -u ssh --since "1 hour ago" | grep -i "failed\|invalid" | tail -20
+sudo grep <span class="prm">"Accepted\|Failed"</span> /var/log/auth.log | awk '{print $NF}' | sort | uniq -c | sort -rn | head</pre>
+</div>
+
+<div class="step"><span class="sn">5</span><span class="st">Find the benign explanation</span>
+<p>Almost certainly one of these, all of them yours:</p>
+<ul>
+  <li>An <code>authorized_keys</code> entry or a cron job on Ubuntu running
+      <code>ssh user@10.0.0.30</code> before the key/agent was fully set up.</li>
+  <li>NetworkManager or a monitoring probe polling port 22.</li>
+  <li>Your own repeated manual <code>ssh</code> attempts while debugging the 2223 forward.</li>
+</ul>
+<p>Or, if the source is genuinely unfamiliar, keep going. The point is that you now have
+evidence, and either a boring answer or a real finding.</p>
+</div>
+
+<div class="step"><span class="sn">6</span><span class="st">Decide and act</span>
+<table class="d">
+  <tr><th style="width:34%">Finding</th><th>Action</th></tr>
+  <tr><td>Benign, expected</td><td>Write a <strong>suppression rule</strong> so it stops wasting your attention (Part&nbsp;13.5). Document it.</td></tr>
+  <tr><td>Benign but should not exist</td><td>Fix the source. A stale cron job is a finding in its own right.</td></tr>
+  <tr><td>Unknown source, repeated failures</td><td>Treat as suspicious. Isolate the VM, capture evidence, note the timeline. This is where a real SOC would escalate.</td></tr>
+</table>
+</div>
+
+<div class="step"><span class="sn">7</span><span class="st">Write it down</span>
+<p>Four lines is enough: <strong>what</strong> you saw, <strong>when</strong> (first and last
+seen), <strong>which host</strong>, <strong>what you concluded and why</strong>. Do this even for
+the boring ones. Security work that is not written down did not happen, and it is also the raw
+material for the portfolio writeup in Part&nbsp;19.</p>
+</div>
+
+<!-- ==================== 8 ==================== -->
+<h1 class="sec">8 &nbsp;Vulnerability Detector</h1>
+
+<p class="lead">This module scans your managed assets against a feed of known CVEs and tells you
+which are actually present. It is a scanner, not an IDS &mdash; different job, complementary
+mindset.</p>
+
+<h2>8.1 How it works</h2>
+<div class="flow">
+  <span class="n">CVE feed</span><span class="ar">&rarr;</span>
+  <span class="n">agent reports OS + packages</span><span class="ar">&rarr;</span>
+  <span class="cmt" style="font-size:8.4pt">manager matches versions</span><span class="ar">&rarr;</span>
+  <span class="n">findings in dashboard</span>
+</div>
+<p>Stock feeds include NVD, Ubuntu, RedHat, Amazon, Debian, Microsoft and Oracle. Some require an
+API key; the ones that do not work out of the box on your install.</p>
+
+<h2>8.2 Using it</h2>
+<table class="d">
+  <tr><th style="width:30%">View</th><th>Question it answers</th></tr>
+  <tr><td><strong>Vulnerability &rarr; Summary</strong></td><td>Totals by severity across the fleet. Start here.</td></tr>
+  <tr><td><strong>Vulnerabilities</strong></td><td>Every individual CVE finding, sortable and filterable by agent, package and severity.</td></tr>
+  <tr><td><strong>Affected agents</strong></td><td>Which machines have findings &mdash; your patch priority list.</td></tr>
+  <tr><td><strong>Packages</strong></td><td>Inventory of software across all agents.</td></tr>
+  <tr><td><strong>Inventory</strong></td><td>OS versions, so you can spot end-of-life systems.</td></tr>
+</table>
+
+<p>Filter for your own findings:</p>
+<pre>location:"vuln-detector" AND rule.level:&gt;=7</pre>
+
+<h2>8.3 Turning off false positives &mdash; the part everyone skips</h2>
+
+<p>A fresh Ubuntu or Windows Server will light up with findings for packages that are not actually
+vulnerable in a way that matters. Suppressing at the source beats arguing with the dashboard.</p>
+
+<div class="step"><span class="sn">STEP 1</span><span class="st">Find the OS detection block</span>
+<pre>sudo nano /var/ossec/etc/ossec.conf</pre>
+<p>In 4.14 the vuln-detector is configured with <code>&lt;ossec_config&gt;</code> inside a
+<code>vulnerability-detector</code> block rather than the old top-level
+<code>&lt;vulnerability-detector&gt;</code> section. Look for it near the bottom.</p>
+</div>
+
+<div class="step"><span class="sn">STEP 2</span><span class="st">Add an ignore entry, then restart</span>
+<pre>&lt;vulnerability-detector&gt;
+  &lt;ignore&gt;
+    &lt;os&gt;CVE-2023-0000, CVE-2024-1111&lt;/os&gt;
+    &lt;package&gt;/usr/share/doc&lt;/package&gt;
+  &lt;/ignore&gt;
+&lt;/vulnerability-detector&gt;</pre>
+<pre>sudo /var/ossec/bin/wazuh-logtest -t   <span class="cmt"># validate XML BEFORE restarting</span>
+sudo systemctl restart wazuh-manager</pre>
+
+<div class="box b-warn" style="margin-top:2mm">
+  <span class="bt">Never ignore a CVE you have not actually assessed</span>
+  <p>An ignore entry is a claim that the finding does not apply. Record why. A suppression list
+  nobody can justify six months later is worse than noise.</p>
+</div>
+</div>
+
+<!-- ==================== 9 ==================== -->
+<h1 class="sec">9 &nbsp;SCA &mdash; Security Configuration Assessment</h1>
+
+<p class="lead">This is arguably the most valuable module you have. It checks whether your machines
+follow a hardening standard (CIS benchmarks) and tells you exactly which settings are wrong.
+Misconfiguration causes more real breaches than any exploit.</p>
+
+<h2>9.1 What it is</h2>
+<p>Wazuh ships policy files that check hundreds of individual settings and grade each
+<span class="tag t-neu">pass</span>, <span class="tag t-md">fail</span> or
+<span class="tag t-neu">not applicable</span>. Policies available on your install:</p>
+<ul>
+  <li><strong>CIS Ubuntu 20.04 / 22.04</strong> &mdash; applies to your SIEM-Ubuntu and Kali agents</li>
+  <li><strong>CIS Windows Server 2019 / 2022</strong> &mdash; the one you will use in Volume&nbsp;2</li>
+  <li><strong>GPOs</strong> &mdash; a bundled set</li>
+</ul>
+
+<h2>9.2 Reading an SCA result</h2>
+<p>Open <strong>System Audit</strong> &rarr; pick your agent &rarr; <strong>CIS</strong> tab. You get
+a long table of checks. Each row has:</p>
+<table class="d">
+  <tr><th style="width:24%">Column</th><th>Meaning</th></tr>
+  <tr><td><strong>Title</strong></td><td>The setting, e.g. &ldquo;Ensure password length minimum is 14 or greater&rdquo;.</td></tr>
+  <tr><td><strong>Result</strong></td><td>Pass / Fail / Not applicable.</td></tr>
+  <tr><td><strong>Remediation</strong></td><td>The exact command or GPO change. Follow it literally.</td></tr>
+  <tr><td><strong>Description</strong></td><td>Why the setting matters. Read this before changing anything.</td></tr>
+</table>
+
+<div class="box b-ok">
+  <span class="bt">This is the module that will make your lab look professional</span>
+  <p>A screenshot of a CIS Windows Server 2022 baseline going from mostly-red to mostly-green,
+  because you fixed it yourself, is a genuinely strong portfolio artefact. It demonstrates you
+  understand <em>why</em> the settings exist, not just that you can run tools. Volume&nbsp;2 is
+  built around producing exactly that.</p>
+</div>
+
+<h2>9.3 Running a policy by hand</h2>
+<pre>sudo /var/ossec/bin/agent_control -R &lt;AGENT_ID&gt;   <span class="cmt"># ask agent to re-read config</span>
+sudo /var/ossec/bin/agent_control -i &lt;AGENT_ID&gt;   <span class="cmt"># restart the agent</span></pre>
+<p>Results appear in the dashboard within a minute. To force a fresh SCA run, restart the agent
+&mdash; the policy is evaluated on agent start.</p>
+
+<h2>9.4 Reading the raw SCA log</h2>
+<pre>sudo tail -40 /var/ossec/logs/ossec.log | grep -i sca
+sudo grep <span class="prm">"sca:"</span> /var/ossec/logs/alerts/alerts.json | tail -3 | python3 -m json.tool</pre>
+
+<!-- ==================== 10 ==================== -->
+<h1 class="sec">10 &nbsp;Compliance dashboards</h1>
+
+<p>Wazuh ships ready-made dashboards that map SCA results to a named compliance framework, so you
+can show a manager &ldquo;we meet CIS Level 1&rdquo; without producing 400 screenshots.</p>
+
+<ul>
+  <li><strong>CIS Microsoft Windows Benchmarks</strong> &mdash; maps to the Windows CIS benchmarks</li>
+  <li><strong>PCI DSS</strong> &mdash; maps findings to PCI DSS requirement 11 (testing) and others</li>
+</ul>
+
+<p>Open <strong>Compliance</strong>, pick a framework, set your date range, and it renders
+requirement-by-requirement pass rates. Expect to be <em>far</em> from 100% on a default Windows
+Server install &mdash; that is the point. The gap between the default state and a hardened state
+is your project.</p>
+
+<div class="box b-info">
+  <span class="bt">Compliance dashboards are for reporting, not for finding problems</span>
+  <p>Use <strong>System Audit</strong> to find and fix individual failures. Use
+  <strong>Compliance</strong> to show the state of the whole estate to someone who does not want
+  detail. Using the wrong one is how people spend a day fixing nothing.</p>
+</div>
+
+<!-- ==================== 11 ==================== -->
+<h1 class="sec">11 &nbsp;File Integrity Monitoring (FIM)</h2>
+
+<p class="lead">FIM takes a fingerprint of files, then tells you when a fingerprint changes. It is
+the module that catches an attacker who got in and did not stay quiet.</p>
+
+<h2>11.1 Why it matters</h2>
+<p>An intruder with remote shell access usually has no malware to detect. They edit
+<code>/etc/passwd</code>, drop a script, or change a config. Every one of those is a FIM event.
+FIM also detects ransomware and log tampering &mdash; if someone clears
+<code>/var/log/auth.log</code>, that is a change to a monitored file.</p>
+
+<h2>11.2 How Wazuh detects it</h2>
+<table class="d">
+  <tr><th style="width:26%">Change type</th><th>Meaning</th></tr>
+  <tr><td class="mono">modified</td><td>Contents changed</td></tr>
+  <tr><td class="mono">added</td><td>New file appeared in a watched directory</td></tr>
+  <tr><td class="mono">deleted</td><td>File removed</td></tr>
+  <tr><td class="mono">hash_changed</td><td>Checksum differs from the stored baseline</td></tr>
+  <tr><td class="mono">attributes_changed</td><td>Permissions or timestamps changed</td></tr>
+</table>
+
+<h2>11.3 Configuring syscheck</h2>
+<p>The block is called <code>syscheck</code> in <code>/var/ossec/etc/ossec.conf</code>.</p>
+
+<pre>&lt;syscheck&gt;
+  &lt;frequency&gt;43200&lt;/frequency&gt;
+  &lt;scan_on_start&gt;
+    &lt;enabled&gt;yes&lt;/enabled&gt;
+    &lt;threads&gt;4&lt;/threads&gt;   <span class="cmt"># parallel scan threads</span>
+  &lt;/scan_on_start&gt;
+
+  &lt;directories&gt;
+    &lt;directory&gt;/etc/passwd&lt;/directory&gt;   <span class="cmt"># single file</span>
+    &lt;directory&gt;/etc/ssh&lt;/directory&gt;      <span class="cmt"># whole dir, no recursion</span>
+    &lt;directory&gt;/etc&lt;/directory&gt;         <span class="cmt"># recursive</span>
+    &lt;directory&gt;/var/www&lt;/directory&gt;     <span class="cmt"># recursive, your app code</span>
+    &lt;directory&gt;/tmp&lt;/directory&gt;         <span class="cmt"># noisy - use nodiff carefully</span>
+    &lt;directory&gt;/bin,/sbin&lt;/directory&gt;  <span class="cmt"># binaries, watch for tampering</span>
+  &lt;/directories&gt;
+
+  &lt;ignore&gt;
+    &lt;type&gt;sregex&lt;/type&gt;
+    &lt;regex&gt;\.swp$|\.log$|~$&lt;/regex&gt;
+  &lt;/ignore&gt;
+
+  &lt;nodiff&gt;
+    &lt;path&gt;/var/lib/apt/lists/&lt;/path&gt;
+    &lt;path&gt;/var/cache/&lt;/path&gt;
+  &lt;/nodiff&gt;
+&lt;/syscheck&gt;</pre>
+
+<table class="d">
+  <tr><th style="width:22%">Directive</th><th>Do this</th></tr>
+  <tr><td class="mono">frequency</td><td>How often the baseline is recomputed, in seconds. 43200 = every 12 h. Lower = more sensitive, more noise.</td></tr>
+  <tr><td class="mono">scan_on_start</td><td>Build the baseline when the agent starts. Almost always yes.</td></tr>
+  <tr><td class="mono">directories</td><td>A trailing slash means "this directory only, no subdirectories".</td></tr>
+  <tr><td class="mono">nodiff</td><td>Watch these paths but do not hash them. Essential for apt and log directories, or you will drown.</td></tr>
+  <tr><td class="mono">ignore</td><td>Skip files entirely, by regex or sregex. Keep this tight.</td></tr>
+  <tr><td class="mono">realtime</td><td>Use inotify on Linux for <em>immediate</em> detection instead of waiting for the next scan.</td></tr>
+</table>
+
+<div class="box b-info">
+  <span class="bt">Validate before you restart &mdash; always</span>
+<pre>sudo /var/ossec/bin/wazuh-logtest -t
+sudo systemctl restart wazuh-manager</pre>
+<p>A malformed <code>ossec.conf</code> will stop the manager from starting, and if you did this
+remotely over SSH you will be locked out. This one command prevents that entirely.</p>
+</div>
+
+<h2>11.4 Seeing FIM alerts</h2>
+<pre>syscheck.type:modified
+syscheck.file:/etc/passwd
+syscheck.type:added</pre>
+<p>And to confirm monitoring is on, from the manager:</p>
+<pre>sudo cat /var/ossec/etc/shared/syscheck-files.txt
+sudo grep <span class="prm">"syscheck"</span> /var/ossec/logs/ossec.log | tail -5</pre>
+
+<h2>11.5 A detection exercise you can do right now</h2>
+<div class="step"><span class="sn">1</span><span class="st">Confirm <code>/etc/passwd</code> is monitored</span></div>
+<div class="step"><span class="sn">2</span><span class="st">Change something harmless</span>
+<pre>sudo cp /etc/passwd /root/passwd.bak
+sudo nano /etc/passwd        <span class="cmt"># add a harmless comment line, save, exit</span></pre>
+</div>
+<div class="step"><span class="sn">3</span><span class="st">Watch it appear</span>
+<pre>syscheck.file:/etc/passwd</pre>
+<p>Within 12 hours you get an alert with the change type, the before/after SHA256 hashes, and the
+agent name. That hash pair is forensic-grade evidence.</p>
+</div>
+<div class="step"><span class="sn">4</span><span class="st">Restore and confirm the alert goes quiet</span>
+<pre>sudo cp /root/passwd.bak /etc/passwd &amp;&amp; sudo rm /root/passwd.bak</pre>
+</div>
+
+<!-- ==================== 12 ==================== -->
+<h1 class="sec">12 &nbsp;Inventory &amp; software inventory</h1>
+
+<p>Syscollector periodically reports hardware, OS, packages and running processes. It powers the
+vulnerability scanner and gives you a live answer to &ldquo;what do we actually run?&rdquo;.</p>
+
+<h2>12.1 What it collects</h2>
+<table class="d">
+  <tr><th style="width:26%">Type</th><th>Detail</th></tr>
+  <tr><td>Hardware</td><td>CPU, RAM, disks, network interfaces</td></tr>
+  <tr><td>OS</td><td>Distribution, kernel, version &mdash; feeds CVE matching</td></tr>
+  <tr><td>Packages</td><td>dpkg on Debian/Ubuntu, rpm on RedHat. <strong>This is what vulnerability detection compares against.</strong></td></tr>
+  <tr><td>Applications</td><td>Installed programs, mainly for Windows</td></tr>
+  <tr><td>Processes</td><td>Running PIDs &mdash; useful, and off by default because it is chatty</td></tr>
+</table>
+
+<h2>12.2 Configure it</h2>
+<pre>&lt;syscollector&gt;
+  &lt;disabled&gt;no&lt;/disabled&gt;
+  &lt;interval&gt;1h&lt;/interval&gt;
+  &lt;scan_on_start&gt;yes&lt;/scan_on_start&gt;
+  &lt;hardware&gt;yes&lt;/hardware&gt;
+  &lt;os&gt;yes&lt;/os&gt;
+  &lt;network&gt;yes&lt;/network&gt;
+  &lt;packages&gt;yes&lt;/packages&gt;   <span class="cmt"># needed for vulnerability detection</span>
+  &lt;ports all="no"&gt;yes&lt;/ports&gt;  <span class="cmt"># listens locally - NOT a scanner</span>
+  &lt;processes&gt;yes&lt;/processes&gt;
+&lt;/syscollector&gt;</pre>
+
+<div class="box b-warn">
+  <span class="bt">&lt;ports&gt; is not remote scanning</span>
+  <p>It only checks ports on the agent's own machine. For scanning other hosts you need nmap or
+  Nessus &mdash; which is exactly what Volume&nbsp;2 does from Kali. Do not confuse the two; the
+  difference matters.</p>
+</div>
+
+<h2>12.3 Reading it</h2>
+<p><strong>Inventory</strong> in the left nav, then <strong>Hardware</strong>, <strong>OS</strong>,
+<strong>Software</strong>, <strong>Packages</strong>. Cross-reference a package version here against
+a CVE in the Vulnerability module &mdash; that is the full loop from &ldquo;what is installed&rdquo;
+to &ldquo;what should I patch&rdquo;.</p>
+
+<!-- ==================== 13 ==================== -->
+<h1 class="sec">13 &nbsp;Writing your own rules and decoders</h1>
+
+<p class="lead">This is the point where you stop being a SIEM user and start being a detection
+engineer. Stock Wazuh ships ~3,000 rules. Your environment will always have something specific it
+does not cover.</p>
+
+<h2>13.1 Local rules override shared rules</h2>
+<pre>/var/ossec/etc/shared/*.xml      <span class="cmt"># stock. Never edit - lost on every upgrade.</span>
+/var/ossec/etc/local_rules.xml   <span class="cmt"># YOUR rules. Read last. Beats anything shared.</span></pre>
+<p>Only <code>local_rules.xml</code> is read from <code>/var/ossec/etc</code>. Anything you add to
+<code>shared/</code> is your own risk during upgrades.</p>
+
+<h2>13.2 Writing your first rule</h2>
+<p>Scenario: you do not want an alert every time a new user is added to the <code>sudo</code>
+group, but you <em>do</em> want one if it happens outside your change window.</p>
+
+<div class="step"><span class="sn">STEP 1</span><span class="st">Find the fields to match on</span>
+<p>Do not guess. Generate a real event and read it:</p>
+<pre>sudo /var/ossec/bin/wazuh-logtest</pre>
+<p>That drops you into an interactive tester. Paste a raw log line from
+<code>/var/log/auth.log</code>, or press Enter for an artificial one. It tells you which rule
+matched and &mdash; crucially &mdash; the <strong>decoded fields</strong>, which is what your rule
+needs to reference.</p>
+<pre>Decoded event: 'srcip': '10.0.0.40', 'srcuser': 'ubuntu', 'dstuser': 'root',
+                'id': '8A7C', 'user': 'root', 'command': '/usr/bin/passwd'
+Full event: ...
+**Rule 5802 matched: 'New user added to the sudo group'
+</pre>
+</div>
+
+<div class="step"><span class="sn">STEP 2</span><span class="st">Write the rule</span>
+<pre>&lt;group name="lab,sudo,"&gt;
+
+  &lt;rule id="100100" level="10"&gt;
+    &lt;if_sid&gt;5802&lt;/if_sid&gt;
+    &lt;match&gt;sudo: COMMAND = /usr/bin/passwd&lt;/match&gt;
+    &lt;description&gt;Password changed with sudo on $(dstuser) account&lt;/description&gt;
+    &lt;mitre&gt;&lt;id&gt;T1098&lt;/id&gt;&lt;/mitre&gt;
+    &lt;group&gt;lab_sudo,password_change,&lt;/group&gt;
+  &lt;/rule&gt;
+
+&lt;/group&gt;</pre>
+
+<table class="d">
+  <tr><th style="width:26%">Directive</th><th>Meaning</th></tr>
+  <tr><td class="mono">id</td><td><strong>Must be local</strong>: 100000&ndash;199999. Using a stock ID silently overwrites a shipped rule.</td></tr>
+  <tr><td class="mono">level</td><td>0&ndash;15. This is the severity shown in the dashboard.</td></tr>
+  <tr><td class="mono">if_sid</td><td>Chain onto an existing rule's alerts. Cheaper and far more reliable than raw regex.</td></tr>
+  <tr><td class="mono">match</td><td>Regex against the decoded event. <code>|</code> for alternatives, <code>*</code> for wildcards.</td></tr>
+  <tr><td class="mono">description</td><td>Use <code>$(field)</code> to interpolate decoded values. This is what you read in the UI.</td></tr>
+  <tr><td class="mono">group</td><td>Tags. <strong>Trailing comma matters</strong> &mdash; without it, this rule's groups are appended to the parent's rather than replacing them.</td></tr>
+  <tr><td class="mono">mitre</td><td>Tactic and technique IDs, so your rule shows up in ATT&amp;CK views.</td></tr>
+</table>
+</div>
+
+<div class="step"><span class="sn">STEP 3</span><span class="st">Test before deploying</span>
+<pre>sudo /var/ossec/bin/wazuh-logtest -t   <span class="cmt"># validates ossec.conf XML</span>
+sudo /var/ossec/bin/wazuh-logtest      <span class="cmt"># paste the raw log line, watch it match 100100</span></pre>
+</div>
+
+<div class="step"><span class="sn">STEP 4</span><span class="st">Deploy and verify end to end</span>
+<pre>sudo systemctl restart wazuh-manager
+sudo /var/ossec/bin/agent_control -R &lt;ID&gt;   <span class="cmt"># refresh agent config</span>
+sudo /var/ossec/bin/agent_control -i &lt;ID&gt;</pre>
+<p>Now actually generate the event on the target and search the dashboard for
+<code>rule.id:100100</code>. A rule that passes <code>wazuh-logtest</code> but never appears is
+usually missing the <code>agent_control -R</code> step.</p>
+</div>
+
+<h2>13.3 Rule-building tactics</h2>
+<table class="d wrap">
+  <tr><th style="width:30%">Technique</th><th>When to use it</th></tr>
+  <tr><td><code>if_sid</code> chaining</td><td>Almost always, instead of writing raw regex. The stock decoder already did the hard parsing.</td></tr>
+  <tr><td>Frequency rules</td><td>Alert on a <em>count</em>: 20 failed logons in 5 minutes is interesting; one is not.</td></tr>
+  <tr><td><code>timeframe</code></td><td>Window a rule applies within.</td></tr>
+  <tr><td><code>if_level</code></td><td>Match any alert at or above a severity &mdash; handy for global escalation.</td></tr>
+  <tr><td>Correlation</td><td>Chain distinct rules together: authentication failure &rarr; then a successful logon from the same IP. This is how you detect a real intrusion from weak individual signals.</td></tr>
+</table>
+
+<h2>13.4 Frequency rule example</h2>
+<pre>&lt;rule id="100110" level="12"&gt;
+  &lt;if_sid&gt;5712&lt;/if_sid&gt;            <span class="cmt"># sshd: Authentication failed</span>
+  &lt;same_source_ip /&gt;
+  &lt;frequency&gt;20&lt;/frequency&gt;
+  &lt;timeframe&gt;300&lt;/timeframe&gt;      <span class="cmt"># 20 failures in 5 minutes</span>
+  &lt;description&gt;Brute force: 20+ failed SSH logons from $(srcip) in 5 minutes&lt;/description&gt;
+  &lt;group&gt;authentication_failures,brute_force,&lt;/group&gt;
+&lt;/rule&gt;</pre>
+
+<h2>13.5 Suppression rules</h2>
+<p>When something is legitimately noisy, lower it rather than hiding it. Keep the evidence, lose
+the noise.</p>
+<pre>&lt;rule id="100200" level="4"&gt;
+  &lt;if_sid&gt;5716&lt;/if_sid&gt;
+  &lt;same_source_ip /&gt;
+  &lt;description&gt;Legitimate internal SSH session from lab host $(srcip)&lt;/description&gt;
+  &lt;group&gt;lab_noise,&lt;/group&gt;
+&lt;/rule&gt;</pre>
+
+<div class="box b-ok">
+  <span class="bt">Design rule of thumb</span>
+  <p>If a rule fires more than about 20 times a day and you always dismiss it, it should not be
+  level 8. Suppress it to level 3&ndash;4 so it stays searchable. Delete it only if it is genuinely
+  irrelevant. Never simply widen a filter to make the badge go away &mdash; that hides the alerts
+  you have not found yet.</p>
+</div>
+
+<h2>13.6 Dev Tools in the dashboard</h2>
+<p><strong>Dev Tools &rarr; Rules</strong> lets you search every rule by ID, description, group and
+MITRE technique without SSH. This is the fast way to answer &ldquo;does Wazuh already detect this,
+and what is it called?&rdquo; before writing your own. <strong>Decoders</strong> does the same for
+parsers &mdash; use it to find which decoder owns a log source and which fields it produces.</p>
+
+<h2>13.7 Custom decoders</h2>
+<p>Only needed when you have a log source Wazuh does not parse at all &mdash; an application you
+wrote, an appliance, a cloud audit log. The shape:</p>
+<pre>&lt;decoder name="lab-app"&gt;
+  &lt;prematch&gt;^\s*\[LABAPP\]\s*&lt;/prematch&gt;
+&lt;/decoder&gt;
+
+&lt;decoder name="lab-app"&gt;
+  &lt;parent&gt;lab-app&lt;/parent&gt;
+  &lt;plugin_decoder&gt;JSON_Decoder&lt;/plugin_decoder&gt;
+&lt;/decoder&gt;
+
+&lt;decoder name="lab-app-fields"&gt;
+  &lt;parent&gt;lab-app&lt;/parent&gt;
+  &lt;plugin_decoder&gt;JSON_Decoder&lt;/plugin_decoder&gt;
+  &lt;plugin_offset&gt;12&lt;/plugin_offset&gt;
+  &lt;path&gt;event.action&lt;/path&gt;
+  &lt;path&gt;user.name&lt;/path&gt;
+  &lt;path&gt;src.ip&lt;/path&gt;
+&lt;/decoder&gt;</pre>
+<p>Save it in <code>/var/ossec/etc/local_decoder.xml</code>, restart the manager, and check the
+Decoders tab in Dev Tools to confirm it loaded. Wazuh's built-in JSON decoder handles most custom
+formats without you writing a regex.</p>
+
+<!-- ==================== 14 ==================== -->
+<h1 class="sec">14 &nbsp;Manager command-line toolkit</h1>
+
+<p>The commands you will actually use, in rough order of frequency.</p>
+
+<h2>14.1 Health and status</h2>
+<pre>sudo systemctl status wazuh-manager wazuh-indexer wazuh-dashboard filebeat
+sudo /var/ossec/bin/wazuh-control status          <span class="cmt"># all daemons at once</span>
+sudo /var/ossec/bin/wazuh-control info            <span class="cmt"># full rule/decoder/plugin counts</span></pre>
+
+<pre>curl -k -u <span class="prm">admin:&lt;MANAGER_PASSWORD&gt;</span> \
+  <span class="prm">https://127.0.0.1:9200/_cluster/health?pretty</span></pre>
+<p>Expect <code class="out">"status" : "green"</code>. <code class="warnout">yellow</code> means a
+replica is missing &mdash; acceptable on a single-node lab. <code class="erro">red</code> means
+data loss risk; check disk space first.</p>
+
+<pre>df -h /                                   <span class="cmt"># indexer is the disk hog</span>
+free -h                                     <span class="cmt"># 2 GB heap + dashboard + OS = ~4 GB needed</span>
+sudo journalctl -u wazuh-indexer -n 50 --no-pager</pre>
+
+<h2>14.2 Agents</h2>
+<pre>sudo /var/ossec/bin/manage_agents -l            <span class="cmt"># list</span>
+sudo /var/ossec/bin/manage_agents -a &lt;NAME&gt; -i &lt;IP&gt;  <span class="cmt"># add from CLI</span>
+sudo /var/ossec/bin/manage_agents -r &lt;ID&gt;      <span class="cmt"># remove</span>
+sudo /var/ossec/bin/manage_agents -R &lt;ID&gt;      <span class="cmt"># reset key</span>
+sudo /var/ossec/bin/manage_agents -e            <span class="cmt"># export the CSV</span></pre>
+
+<pre>sudo /var/ossec/bin/agent_control -l            <span class="cmt"># live agents + last keep-alive</span>
+sudo /var/ossec/bin/agent_control -i &lt;ID&gt;      <span class="cmt"># restart</span>
+sudo /var/ossec/bin/agent_control -R &lt;ID&gt;      <span class="cmt"># force config re-read</span>
+sudo /var/ossec/bin/agent_control -s            <span class="cmt"># all agent status codes</span></pre>
+
+<h2>14.3 Testing and debugging</h2>
+<pre>sudo /var/ossec/bin/wazuh-logtest              <span class="cmt"># interactive rule tester</span>
+sudo /var/ossec/bin/wazuh-logtest -t           <span class="cmt"># validate ossec.conf</span>
+sudo /var/ossec/bin/wazuh-logtest -d           <span class="cmt"># dump decoded fields, no rule match</span>
+sudo /var/ossec/bin/wazuh-logtest -f <span class="prm">&lt;rulefile.xml&gt;</span></pre>
+
+<pre>sudo tail -f /var/ossec/logs/alerts/alerts.json | python3 -m json.tool
+sudo tail -100 /var/ossec/logs/ossec.log
+sudo grep -i <span class="prm">"error\|denied\|refused"</span> /var/ossec/logs/ossec.log | tail -20</pre>
+
+<p>And the one that saves the most time &mdash; confirm a rule actually fired:</p>
+<pre>sudo grep <span class="prm">"rule_id\":\"100100"</span> /var/ossec/logs/alerts/alerts.json | tail -2</pre>
+
+<h2>14.4 Useful log locations</h2>
+<table class="d">
+  <tr><th style="width:52%">Path</th><th>Contents</th></tr>
+  <tr><td class="mono">/var/ossec/logs/alerts/alerts.json</td><td>Every alert. The Filebeat source.</td></tr>
+  <tr><td class="mono">/var/ossec/logs/ossec.log</td><td>Manager's own activity log.</td></tr>
+  <tr><td class="mono">/var/ossec/logs/active-response.log</td><td>Firewall blocks and other automated responses.</td></tr>
+  <tr><td class="mono">/var/ossec/logs/integrator.log</td><td>What was shipped to the indexer, and any failures.</td></tr>
+  <tr><td class="mono">/var/ossec/logs/wazuh-indexer.log</td><td>Indexer connectivity from the manager.</td></tr>
+  <tr><td class="mono">/var/log/filebeat/</td><td>Filebeat's own log. Read this when alerts stop appearing in the UI.</td></tr>
+  <tr><td class="mono">/etc/wazuh-indexer/opensearch.yml</td><td>Indexer config (you added memory_lock false here).</td></tr>
+  <tr><td class="mono">/var/ossec/etc/ossec.conf</td><td>Manager master config.</td></tr>
+</table>
+
+<!-- ==================== 15 ==================== -->
+<h1 class="sec">15 &nbsp;Querying Wazuh through the REST API</h1>
+
+<p>The API is how you do anything at scale, and how automation tools reach Wazuh. Everything below
+runs from inside SIEM-Ubuntu.</p>
+
+<h2>15.1 Get a token</h2>
+<pre>curl -sk -X POST <span class="prm">"https://localhost:55000/security/user/authenticate?raw=true"</span> \
+  -d <span class="prm">'{"username":"wazuh-wui","password":"wazuh-wui"}'</span>
+<span class="cmt"># returns a long JWT. -k skips TLS verify; -s silences the progress bar.</span></pre>
+
+<pre>export TOKEN=<span class="prm">"PASTE_TOKEN_HERE"</span></pre>
+
+<div class="box b-info">
+  <span class="bt">Why tokens instead of the password</span>
+  <p>Tokens expire (default 900 s, configurable). This is not a nuisance to work around &mdash; it
+  is the pattern you will use professionally. Automation should never store an admin password.</p>
+</div>
+
+<h2>15.2 Common calls</h2>
+<pre><span class="cmt"># agent list</span>
+curl -sk -H <span class="prm">"Authorization: Bearer $TOKEN"</span> https://localhost:55000/agents
+
+<span class="cmt"># one agent's details</span>
+curl -sk -H <span class="prm">"Authorization: Bearer $TOKEN"</span> https://localhost:55000/agents/001
+
+<span class="cmt"># SCA results for an agent</span>
+curl -sk -H <span class="prm">"Authorization: Bearer $TOKEN"</span> \
+  <span class="prm">"https://localhost:55000/sca/001?pretty"</span>
+
+<span class="cmt"># active response</span>
+curl -sk -H <span class="prm">"Authorization: Bearer $TOKEN"</span> \
+  <span class="prm">"https://localhost:55000/agents/001/config/active-response?pretty"</span>
+
+<span class="cmt"># Wazuh API info (shows all available endpoints)</span>
+curl -sk -H <span class="prm">"Authorization: Bearer $TOKEN"</span> https://localhost:55000/?pretty</pre>
+
+<h2>15.3 Querying the indexer directly</h2>
+<p>For ad-hoc forensics, the indexer gives you full Lucene power over raw alert documents.</p>
+<pre>curl -sk -u <span class="prm">admin:&lt;MANAGER_PASSWORD&gt;</span> \
+  <span class="prm">"https://127.0.0.1:9200/wazuh-alerts-4.x-*/_search?size=5&amp;pretty"</span></pre>
+
+<p>How many alerts per agent in the last day?</p>
+<pre>curl -sk -u <span class="prm">admin:&lt;MANAGER_PASSWORD&gt;</span> \
+  <span class="prm">"https://127.0.0.1:9200/wazuh-alerts-4.x-*/_search?pretty"</span> -H <span class="prm">'Content-Type: application/json'</span> -d '{
+  "size": 0,
+  "query": { "range": { "timestamp": { "gte": "now-24h" } } },
+  "aggs": { "by_agent": { "terms": { "field": "agent.name", "size": 20 } } }
+}'</pre>
+
+<p>Only critical alerts, newest first:</p>
+<pre>curl -sk -u <span class="prm">admin:&lt;MANAGER_PASSWORD&gt;</span> \
+  <span class="prm">"https://127.0.0.1:9200/wazuh-alerts-4.x-*/_search?pretty"</span> -H <span class="prm">'Content-Type: application/json'</span> -d '{
+  "size": 20,
+  "sort": [ { "timestamp": { "order": "desc" } } ],
+  "query": {
+    "bool": {
+      "filter": [
+        { "range": { "rule.level": { "gte": 12 } } },
+        { "range": { "timestamp": { "gte": "now-7d" } } }
+      ]
+    }
+  }
+}'</pre>
+
+<h2>15.4 Index names you will see</h2>
+<table class="d">
+  <tr><th style="width:46%">Index</th><th>Contents</th></tr>
+  <tr><td class="mono">wazuh-alerts-4.x-YYYY.MM.DD</td><td>Alerts, daily index. This is what the dashboard reads.</td></tr>
+  <tr><td class="mono">wazuh-states-inventory-*</td><td>Syscollector inventory data per agent.</td></tr>
+  <tr><td class="mono">wazuh-states-vulnerabilities-*</td><td>Vulnerability scan findings.</td></tr>
+  <tr><td class="mono">wazuh-archives-*</td><td>Historic events from the archives module (disabled in your setup).</td></tr>
+</table>
+
+<!-- ==================== 16 ==================== -->
+<h1 class="sec">16 &nbsp;Troubleshooting</h1>
+
+<h2>16.1 Dashboard will not load</h2>
+<table class="d wrap">
+  <tr><th style="width:38%">Check</th><th>Expected / action</th></tr>
+  <tr><td>Is the VM running?</td><td>VM must be powered on, not paused. A suspended VM will not answer on any port.</td></tr>
+  <tr><td>Is the dashboard listening on 443?</td><td><code>sudo ss -tlnp | grep :443</code></td></tr>
+  <tr><td>Is it up but slow?</td><td>Normal on first load. Watch <code>systemctl is-active wazuh-indexer</code>.</td></tr>
+  <tr><td>Wrong URL?</td><td>Use <code>https://127.0.0.1:4433</code>. Plain <code>http</code> will fail &mdash; it is TLS-only.</td></tr>
+  <tr><td>Index unhealthy?</td><td><code>curl -k ... /_cluster/health</code>. Red means data at risk.</td></tr>
+  <tr><td>Out of memory?</td><td><code>free -h</code>. The 8 GB you allocated is close to the minimum for this stack.</td></tr>
+</table>
+
+<h2>16.2 Agents show "Never connected" or "Disconnected"</h2>
+<pre>sudo /var/ossec/bin/agent_control -l              <span class="cmt"># on the manager - is it there?</span>
+ping -c2 10.0.0.30                                <span class="cmt"># from the manager, on intnet</span>
+sudo grep <span class="prm">"Enrolled\|ERROR\|key"</span> /var/log/wazuh-agent/wazuh-agent.log | tail -20</pre>
+<table class="d wrap">
+  <tr><th style="width:38%">Likely cause</th><th>Fix</th></tr>
+  <tr><td>Wrong manager IP</td><td>Must be <code>10.0.0.40</code>, never the NAT address. Check <code>/var/ossec/etc/ossec.conf</code> on the agent.</td></tr>
+  <tr><td>Wrong network segment</td><td>Both agents must be on <code>intnet</code>. NAT guests cannot reach each other.</td></tr>
+  <tr><td>Key mismatch</td><td>Compare the agent's key with the manager's record. Reset with <code>manage_agents -R</code>.</td></tr>
+  <tr><td>Port 1514 blocked</td><td>Test from the agent: <code>timeout 5 bash -c "cat &lt;/dev/null &gt;/dev/tcp/10.0.0.40/1514"</code></td></tr>
+  <tr><td>Manager stopped</td><td><code>systemctl status wazuh-manager</code> &mdash; if remoted is down nothing connects.</td></tr>
+</table>
+
+<h2>16.3 Alerts stop appearing in the UI, but they are in alerts.json</h2>
+<p>This is a Filebeat or indexer problem, not a manager problem. Work down:</p>
+<pre>sudo tail -20 /var/log/filebeat/filebeat-7.10.2
+sudo systemctl status filebeat
+sudo grep -i <span class="prm">"error\|refused\|cert"</span> /var/log/filebeat/filebeat-7.10.2 | tail
+sudo tail -30 /var/ossec/logs/integrator.log
+sudo systemctl status wazuh-indexer</pre>
+<p>A frequent cause in a TLS lab: a certificate expired or was regenerated without reloading
+Filebeat. Then <code>curl -k https://127.0.0.1:9200/_cluster/health</code> inside the VM is the
+decisive test.</p>
+
+<h2>16.4 SSH from Windows to Kali does not work</h2>
+<p>Known and pending from the network fix. The port forward on 2223 was created while Kali still
+had the clashing NAT address, and the NAT engine cached it. Kali must be powered off:</p>
+<pre>VBoxManage modifyvm "kali-linux-2026.2-virtualbox-amd64" --natpf2 delete ssh-host
+VBoxManage modifyvm "kali-linux-2026.2-virtualbox-amd64" --natpf2 <span class="prm">"ssh-host,tcp,127.0.0.1,2223,10.0.3.20,22"</span>
+VBoxManage startvm "kali-linux-2026.2-virtualbox-amd64" --type headless</pre>
+<p>Note the explicit guest IP &mdash; that stops it chasing a moving address. Meanwhile, SSH through
+SIEM-Ubuntu works today:</p>
+<pre>ssh -p <span class="prm">2222</span> ubuntu@127.0.0.1
+ssh kali@10.0.0.30</pre>
+
+<h2>16.5 Configuration will not validate</h2>
+<pre>sudo /var/ossec/bin/wazuh-logtest -t</pre>
+<p>Reports the file and line of the XML error. Two classic causes: unescaped <code>&amp;</code> in a
+regex or description, and a <code>&lt;group&gt;</code> list missing its trailing comma.</p>
+
+<div class="box b-bad">
+  <span class="bt">Never restart the manager before validating</span>
+  <p>If you edit <code>ossec.conf</code> over SSH and the XML is broken, the manager will fail to
+  start and your SSH session may survive but the agent link will not. Always
+  <code>wazuh-logtest -t</code>, then restart. There is no reason to skip this.</p>
+</div>
+
+<h2>16.6 Quick reference</h2>
+<table class="d">
+  <tr><th style="width:44%">Symptom</th><th>First thing to run</th></tr>
+  <tr><td>Dashboard blank</td><td><code>systemctl status wazuh-dashboard</code></td></tr>
+  <tr><td>No new alerts</td><td><code>agent_control -l</code>, then <code>tail -f alerts.json</code></td></tr>
+  <tr><td>Alerts not in UI</td><td><code>tail /var/log/filebeat/filebeat-7.10.2</code></td></tr>
+  <tr><td>Cluster red</td><td><code>df -h /</code> and <code>free -h</code></td></tr>
+  <tr><td>Manager died after an edit</td><td><code>wazuh-logtest -t</code></td></tr>
+  <tr><td>No MITRE tags</td><td>Normal &mdash; only some shipped rules carry them. Your rules need <code>&lt;mitre&gt;</code>.</td></tr>
+</table>
+
+<!-- ==================== 17 ==================== -->
+<h1 class="sec">17 &nbsp;Maintenance</h1>
+
+<h2>17.1 Changing the dashboard password</h2>
+<pre>sudo /usr/share/wazuh-indexer/plugins/opensearch-security/tools/wazuh-passwords-tool.sh \
+  -a -p <span class="prm">'YourNewStrongPassword'</span> -u admin
+sudo systemctl restart wazuh-indexer wazuh-dashboard</pre>
+
+<h2>17.2 Changing the API and internal passwords</h2>
+<p>Run <code>wazuh-passwords-tool.sh</code> without <code>-a</code> to be prompted, changing
+<code>wazuh</code>, <code>wazuh-wui</code>, <code>kibanaserver</code> and <code>admin</code>. Keep
+a copy of the output &mdash; that file is the only record of these credentials.</p>
+
+<div class="box b-warn">
+  <span class="bt">These are the credentials printed in your lab report</span>
+  <p>Change all of them before this VM goes anywhere near a network you care about. The NAT
+  forwards bind to <code>127.0.0.1</code>, which limits exposure, but a VirtualBox NAT forward will
+  still accept connections from anything VirtualBox considers a local peer. Assume public.</p>
+</div>
+
+<h2>17.3 Certificates</h2>
+<pre>sudo /var/ossec/etc/wazuh-indexer/certs/config.yml.bak   <span class="cmt"># your backup of the cert tool config</span>
+sudo ls -la /etc/wazuh-indexer/certs/
+sudo openssl x509 -in /etc/wazuh-indexer/certs/indexer.pem -noout -dates</pre>
+<p>Regenerate all of them at once if any expire:</p>
+<pre>sudo /var/ossec/etc/wazuh-indexer/certs/wazuh-certs-tool.sh -A
+sudo systemctl restart wazuh-indexer filebeat wazuh-manager</pre>
+
+<h2>17.4 Backups worth taking</h2>
+<table class="d">
+  <tr><th style="width:40%">What</th><th>How</th></tr>
+  <tr><td>Manager config</td><td><code>cp -a /var/ossec/etc /root/ossec-etc-backup-$(date +%F)/</code></td></tr>
+  <tr><td>Indexer config + security</td><td><code>cp -a /etc/wazuh-indexer/opensearch-security /root/</code></td></tr>
+  <tr><td>Certificates</td><td><code>cp -a /etc/wazuh-indexer/certs /root/certs-backup/</code></td></tr>
+  <tr><td>VM snapshot</td><td>The real one. Power off and snapshot in VirtualBox before any config change.</td></tr>
+  <tr><td>Your rules</td><td>Keep <code>local_rules.xml</code> and <code>local_decoder.xml</code> in git. You will edit them often.</td></tr>
+</table>
+
+<div class="box b-ok">
+  <span class="bt">Do this right now, it takes two minutes</span>
+  <p>Power off SIEM-Ubuntu and take a VirtualBox snapshot named <code>wazuh-working-30sep</code>.
+  You now have a known-good restore point before starting the Windows Server work in Volume&nbsp;2.
+  Every future change becomes low-risk.</p>
+</div>
+
+<h2>17.5 Updates</h2>
+<p>Do not casually <code>apt upgrade</code> the Wazuh packages &mdash; a partial version mismatch
+between manager, agent and dashboard will break the pipeline in ways that are painful to debug.
+Upgrade the whole stack deliberately, manager last, one component at a time, and snapshot first.</p>
+
+<!-- ==================== 18 ==================== -->
+<h1 class="sec">18 &nbsp;Lab exercises to work through</h1>
+
+<p class="lead">Reading a guide teaches you very little. These build the actual skill, in order,
+each one producing evidence you can put in a portfolio.</p>
+
+<table class="d wrap">
+  <tr><th style="width:8%">#</th><th style="width:38%">Exercise</th><th>Success looks like</th></tr>
+  <tr><td class="c">1</td><td>Log in, take the Overview screenshot, note your baseline alert count and agent list.</td><td>A saved image and a number you can compare against later.</td></tr>
+  <tr><td class="c">2</td><td>Run three Lucene queries from section 6.2 and save each as a named search.</td><td>Three saved searches on the left rail you actually understand.</td></tr>
+  <tr><td class="c">3</td><td>Pull one alert's <em>Full event</em> JSON and write down what every field means.</td><td>You could explain the alert to someone else without looking it up.</td></tr>
+  <tr><td class="c">4</td><td>Complete the section 7 investigation. Follow it to a real conclusion.</td><td>Four written lines: what, when, which host, conclusion.</td></tr>
+  <tr><td class="c">5</td><td>Review the CIS SCA results for Kali. Pick 5 failing checks and fix them.</td><td>Five green checks that were red, and the commands you used.</td></tr>
+  <tr><td class="c">6</td><td>Add FIM on <code>/etc/passwd</code>, <code>/etc/ssh</code>, <code>/etc/crontab</code>. Do the section 11.5 exercise.</td><td>A before/after SHA256 pair in an alert.</td></tr>
+  <tr><td class="c">7</td><td>Write a local rule 100100 that alerts on a specific event of your choosing. Test it with wazuh-logtest, then trigger it for real.</td><td>An alert in the dashboard with your rule ID and a MITRE tag.</td></tr>
+  <tr><td class="c">8</td><td>Write a frequency rule that escalates on a pattern (failures over time, or repeated scans).</td><td>A level-12 alert that only appears when the pattern is genuinely met.</td></tr>
+  <tr><td class="c">9</td><td>Add an ignore entry for a false-positive CVE. Document the justification.</td><td>One clean documented line in ossec.conf and in your notes.</td></tr>
+  <tr><td class="c">10</td><td>Use the API to pull SCA results for Kali and save them as JSON.</td><td>A file proving you can automate the collection.</td></tr>
+  <tr><td class="c">11</td><td>Take the snapshot from 17.4.</td><td>A restore point that exists.</td></tr>
+</table>
+
+<!-- ==================== 19 ==================== -->
+<h1 class="sec">19 &nbsp;Where to take this next</h1>
+
+<h2>19.1 The obvious next step</h2>
+<p><strong>Volume&nbsp;2</strong>, companion to this guide: enroll your Windows Server 2022 VM as a
+Wazuh agent, harden it from Kali, and then run controlled simulations to prove Wazuh detects them.
+That takes you from &ldquo;I have a SIEM&rdquo; to &ldquo;I have a validated detection capability&rdquo;
+&mdash; a much more valuable claim, and a far better portfolio artefact.</p>
+
+<h2>19.2 After that</h2>
+<table class="d wrap">
+  <tr><th style="width:34%">Direction</th><th>Why it is worth doing</th></tr>
+  <tr><td><strong>Suricata on SIEM-Ubuntu</strong></td><td>Wazuh sees what hosts <em>report</em>; Suricata sees what actually crosses the wire. Install it on Ubuntu, ship its <code>eve.json</code> into Wazuh via a Filebeat input, and you now have real network detection. This is the single highest-value addition to your lab.</td></tr>
+  <tr><td><strong>Windows Client + Active Directory</strong></td><td>Enroll your Windows 11 VM, then promote WinServer to a domain controller. Kerberos, group policy, logon types and domain events are where most real-world Windows security happens.</td></tr>
+  <tr><td><strong>osquery</strong></td><td>SQL-query your endpoints like a database. Pairs well with Wazuh as a second opinion.</td></tr>
+  <tr><td><strong>Sigma rules</strong></td><td>Portable detection-rule format. Write one, run it in Wazuh, then you have a transferable skill rather than a vendor-specific one.</td></tr>
+  <tr><td><strong>Sysmon on Windows</strong></td><td>Far richer process/network telemetry than stock Windows event channels. Covered in Volume&nbsp;2.</td></tr>
+  <tr><td><strong>A second Kali/attacker VM</strong></td><td>Separates attacker and analyst. Right now Kali is both your attack tool and a monitored agent &mdash; which is actually useful, because you can watch your own actions appear in the SIEM.</td></tr>
+  <tr><td><strong>Write it up</strong></td><td>A GitHub repo with your <code>local_rules.xml</code>, your FIM config, your SCA before/after, and a README explaining each. This is what gets you a job, far more than a certificate does.</td></tr>
+  <tr><td><strong>TryHackMe / PortSwigger</strong></td><td>Structured practice on attack techniques, to understand what you are detecting. You have a Security+ certificate; these build the applied half.</td></tr>
+</table>
+
+<h2>19.3 A note on where you actually are</h2>
+<p>You have, in about a day: a working three-node SIEM with TLS, a custom Filebeat pipeline,
+a live agent fleet, and &mdash; more importantly &mdash; you debugged a multi-layer network fault
+end to end without panicking.</p>
+<p>Most people who take a Security+ course never get a working SIEM. The thing that got you through
+yesterday was not memorising commands, it was forming a hypothesis, testing it against evidence,
+and forming a better one. That is the actual job. Everything in this document is just tooling for
+doing it systematically.</p>
+
+<div class="box b-info" style="margin-top:6mm">
+  <span class="bt">Document conventions</span>
+  <p>Every command, IP, port and path in this guide was verified against your actual VMs on
+  30&nbsp;September&nbsp;2026. Values marked <em>planned</em>, <em>optional</em> or
+  <em>if&nbsp;different</em> are the only ones you may need to adjust. If you change your lab
+  topology, this document drifts &mdash; keep it in the same place as your config backups so you
+  know how old it is.</p>
+</div>
+
+</body>
+</html>

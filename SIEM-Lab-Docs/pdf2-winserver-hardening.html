@@ -1,0 +1,1840 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Windows Server 2022 Hardening &amp; Detection Lab</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- ==================== COVER ==================== -->
+<div class="cover">
+  <div>
+    <div class="kicker">SIEM Lab &middot; Volume 2</div>
+    <h1>Hardening Windows Server &amp;<br>Validating Your Detection</h1>
+    <div class="rule"></div>
+    <h2>Secure a Windows Server 2022 VM from Kali, enroll it in your Wazuh SIEM,
+        and prove your SIEM actually catches what happens next.</h2>
+    <div class="meta">
+      <table>
+        <tr><td>Written for</td><td>A Linux-only learner building their first security lab</td></tr>
+        <tr><td>Target machine</td><td>WinServer &mdash; Windows Server 2022 (build 20348), 4 GB RAM</td></tr>
+        <tr><td>Assessment host</td><td>Kali 10.0.0.30 &middot; SIEM-Ubuntu 10.0.0.40 (Wazuh 4.14.8)</td></tr>
+        <tr><td>Lab network</td><td>VirtualBox <code>intnet</code>, 10.0.0.0/24, fully isolated</td></tr>
+        <tr><td>Assumes</td><td>Volume 1 &mdash; you can already operate the Wazuh dashboard</td></tr>
+        <tr><td>Document date</td><td>30 September 2026</td></tr>
+      </table>
+    </div>
+    <div class="note">
+      <strong>What this guide is.</strong> It does three things, in order: it <em>audits</em>
+      your Windows Server from Kali, it <em>hardens</em> it, and it then deliberately generates
+      suspicious activity <em>on your own server</em> so you can prove Wazuh detects it.
+      That last part is the whole point &mdash; a detection you have never seen fire is not a
+      detection, it is a hope.
+    </div>
+  </div>
+</div>
+
+<!-- ==================== SCOPE ==================== -->
+<h1 class="sec nobreak">Scope &mdash; read this before you start</h1>
+
+<p class="lead">Being precise about this is not bureaucracy. It is the professional habit, and it
+is why penetration testers get to do interesting work legally.</p>
+
+<div class="box b-ok">
+  <span class="bt">Everything in this guide targets one machine you own</span>
+  <p>Every command here runs against <code>10.0.0.50</code> &mdash; a VirtualBox VM on your own
+  laptop, on an isolated network segment with no route to anything. There is no third-party system
+  here, no wordlist, and no credential attack of any kind. Where authentication events are needed
+  for a detection test, you use a throwaway account you created yourself and a single password you
+  deliberately mistype, so that log events exist to be detected. You are generating log volume to
+  test a sensor, not attempting to access anything.</p>
+</div>
+
+<table class="d wrap">
+  <tr><th style="width:44%">This guide covers</th><th>This guide does not cover</th></tr>
+  <tr>
+    <td>
+      &bull; Reading a Windows Server's configuration &mdash; accounts, password policy, SMB,
+          auditing, firewall &mdash; from both sides<br>
+      &bull; Fixing what is wrong, with the reasoning behind each setting<br>
+      &bull; Enrolling Windows into an existing SIEM correctly<br>
+      &bull; Generating controlled activity on your own host and confirming
+          the SIEM reports it<br>
+      &bull; Writing Wazuh rules for Windows event IDs<br>
+      &bull; Writing it all up
+    </td>
+    <td>
+      &bull; Compromising, exploiting or gaining unauthorised access to any system<br>
+      &bull; Password spraying, brute forcing, or use of wordlists and cracking tools<br>
+      &bull; Exploit payloads, weaponised tooling, or post-exploitation<br>
+      &bull; Anything against a machine you do not own and have written authorisation for
+    </td>
+  </tr>
+</table>
+
+<div class="box b-warn">
+  <span class="bt">The habit worth building now, not later</span>
+  <p>Professional practice is that a system is &ldquo;in scope&rdquo; only when someone has
+  documented permission for it. For your own lab that is trivially true &mdash; but write the
+  scope line down anyway when you start your notes in Part&nbsp;P8. It is the first thing a hiring
+  manager looks for in a portfolio, and it is the thing that keeps hobbyists out of legal trouble.</p>
+</div>
+
+<!-- ==================== TOC ==================== -->
+<h1 class="sec nobreak">Contents</h1>
+<div class="toc">
+  <div><span class="n">P0</span> Windows for a Linux person</div>
+  <div><span class="n">P1</span> Prepare WinServer in the lab</div>
+  <div><span class="n">P2</span> Enroll it in Wazuh</div>
+  <div><span class="n">P3</span> Audit it from Kali (read-only)</div>
+  <div><span class="n">P4</span> Harden it &mdash; the main event</div>
+  <div><span class="n">P5</span> Validate your detection</div>
+  <div><span class="n">P6</span> Windows event coverage and Sysmon</div>
+  <div><span class="n">P7</span> Detection rules for Windows</div>
+  <div><span class="n">P8</span> The writeup template</div>
+  <div><span class="n">P9</span> Project roadmap &mdash; what to build next</div>
+  <div><span class="n">A</span> Windows security event ID reference</div>
+  <div><span class="n">B</span> Command cheat sheet</div>
+</div>
+
+<!-- ==================== P0 ==================== -->
+<h1 class="sec">P0 &nbsp;Windows for a Linux person</h1>
+
+<p class="lead">You will be much faster if this section is read rather than skipped. Every concept
+here trips up Linux people, and all of them matter for the work ahead.</p>
+
+<h2>P0.1 The mapping table</h2>
+<table class="d wrap">
+  <tr><th style="width:24%">Linux concept you know</th><th style="width:26%">Windows equivalent</th><th>What will confuse you</th></tr>
+  <tr>
+    <td>Systemd service</td><td><strong>Windows Service</strong>, managed by the SCM</td>
+    <td>Services are configured in <code>services.msc</code>, not <code>systemctl</code>. Some can
+        be set to start automatically via PowerShell (Part&nbsp;P2.3).</td>
+  </tr>
+  <tr>
+    <td><code>/var/log/auth.log</code></td><td><strong>Event Log</strong> &mdash; structured records with numeric IDs</td>
+    <td>The single most important difference. Windows does not have text log files you
+        <code>grep</code>. Everything is an event with a numeric ID, and <strong>the ID is what
+        matters</strong>. See Appendix&nbsp;A.</td>
+  </tr>
+  <tr>
+    <td><code>/etc/passwd</code>, <code>/etc/shadow</code></td><td>SAM database, NTDS on a domain controller</td>
+    <td>Not plain text. Never edit it directly.</td>
+  </tr>
+  <tr>
+    <td>netplan / NetworkManager</td><td><code>ncpa.cpl</code> or PowerShell NetTCPIP</td>
+    <td>Adapters are named by localised display name (&ldquo;Ethernet&rdquo;, &ldquo;Ethernet&nbsp;2&rdquo;),
+        localised. If you changed the OS language, the name changes too. Prefer matching on the
+        interface index or description where you can.</td>
+  </tr>
+  <tr>
+    <td>Users and groups in <code>/etc/group</code></td><td>Local users / groups, plus Active Directory on a DC</td>
+    <td>Two completely separate systems. A standalone server has only local accounts.</td>
+  </tr>
+  <tr>
+    <td>Config files in <code>/etc</code></td><td><strong>Registry</strong></td>
+    <td>One enormous tree of settings. <code>HKLM\SYSTEM\CurrentControlSet\Control\Lsa</code> is
+        the one you will use most. Edit with <code>regedit</code> or <code>reg add</code>.</td>
+  </tr>
+  <tr>
+    <td>iptables / nftables</td><td>Windows Defender Firewall</td>
+    <td>Profiles (Domain / Private / Public) decide which rule set applies. Getting the profile
+        wrong is why &ldquo;my firewall rule doesn't work&rdquo;.</td>
+  </tr>
+  <tr>
+    <td>bash, shell scripts</td><td><strong>PowerShell</strong></td>
+    <td>Object-based, not text-based. Where Linux pipes strings, PowerShell pipes rich objects.
+        This actually makes many admin tasks easier &mdash; but it is a different mindset.</td>
+  </tr>
+  <tr>
+    <td>systemd targets / boot order</td><td>Windows services + dependencies</td>
+    <td>&ldquo;Startup type&rdquo; is the equivalent of an enable/disable.</td>
+  </tr>
+</table>
+
+<h2>P0.2 Two facts about Windows security you cannot skip</h2>
+
+<div class="box b-bad">
+  <span class="bt">1. Windows denies by default, Linux allows by default</span>
+  <p>An empty firewall ruleset on Windows blocks everything inbound. This will bite you the very
+  first time: the Wazuh agent ships, starts, and then sends <em>nothing</em>, because Windows
+  Firewall silently drops inbound port 1514. You will lose an afternoon to this if nobody tells
+  you. Part&nbsp;P2.4 has the fix.</p>
+</div>
+
+<div class="box b-bad">
+  <span class="bt">2. Event ID 4624 is logged by default; the useful ones are not</span>
+  <p>A default Windows Server logs successful and failed logons and little else. No process
+  creation. No detailed file access. No privilege changes. <strong>Part&nbsp;P4.4 turns on the
+  auditing your SIEM needs</strong> &mdash; and that section is the single highest-value part of
+  this entire guide, because without it Wazuh will be nearly blind on Windows.</p>
+</div>
+
+<h2>P0.3 PowerShell survival skills</h2>
+<p>You are about to run a lot of PowerShell. It is not hard, but it is strict about punctuation.</p>
+<table class="d">
+  <tr><th style="width:34%">Need</th><th>Command</th></tr>
+  <tr><td>Run as Administrator</td><td><span class="kbd">Windows Terminal</span> &rarr; dropdown &rarr; <em>Administrator</em>. Or <span class="kbd">Win</span>+<span class="kbd">X</span> &rarr; <em>Terminal (Admin)</em></td></tr>
+  <tr><td>Find a command</td><td><code>Get-Command *smb*</code></td></tr>
+  <tr><td>Explain a parameter</td><td><code>Get-Help Set-SmbServerConfiguration -Full</code></td></tr>
+  <tr><td>See current state (no changes)</td><td><code>Get-SmbServerConfiguration</code></td></tr>
+  <tr><td>Apply a change</td><td><code>Set-SmbServerConfiguration ...</code> &mdash; the pattern is always Get to read, Set to change</td></tr>
+  <tr><td>Output as table / list</td><td><code>... | Format-Table -AutoSize</code> &nbsp;&nbsp;<code>... | Format-List</code></td></tr>
+  <tr><td>Continue past an error</td><td><code>$ErrorActionPreference = 'Continue'</code></td></tr>
+</table>
+
+<div class="box b-info">
+  <span class="bt">Get-Command and Get-Help are your man pages</span>
+  <p>Same idea as <code>man</code> in Linux. PowerShell ships with real help on most modules,
+  including examples. <code>Get-Help about_Firewall</code> is the equivalent of reading the
+  admin guide, and it is genuinely good.</p>
+</div>
+
+<!-- ==================== P1 ==================== -->
+<h1 class="sec">P1 &nbsp;Prepare WinServer in the lab</h1>
+
+<h2>P1.1 Current state, and the problems it causes</h2>
+<p>WinServer currently has a single adapter on <code>intnet</code> and no internet connection.
+That is fine for isolation, and it is a problem for installing an agent. Also worth noting from
+the VM config: the install ISO is still attached to the DVD drive.</p>
+
+<table class="d wrap">
+  <tr><th style="width:30%">Current</th><th style="width:20%">Worth keeping?</th><th>Consequence</th></tr>
+  <tr><td>NIC 1 &mdash; intnet only</td><td>Yes</td><td>This is the lab network. Keep it. Everything agent-related happens here.</td></tr>
+  <tr><td>NIC 2 &mdash; <em>disabled</em></td><td>Deliberate or accidental</td><td><strong>No internet.</strong> Cannot download the agent, cannot run Windows Update, cannot install tools. Fix in P1.3.</td></tr>
+  <tr><td>Install ISO attached to DVD</td><td>No</td><td>Boots into setup if boot order is ever changed. Detach it.</td></tr>
+  <tr><td>No static IP</td><td>&mdash;</td><td>There is no DHCP server on <code>intnet</code>, so this adapter likely has no IPv4 address at all &mdash; the same failure you already fixed twice on Ubuntu. See P1.4.</td></tr>
+  <tr><td>Guest Additions 7.2.12</td><td>Yes</td><td>Gives you an out-of-band command channel. Your safety net. Do not uninstall.</td></tr>
+  <tr><td>4 GB RAM</td><td>Acceptable</td><td>Tight but workable for Server 2022. 6 GB is more comfortable if the host has headroom.</td></tr>
+</table>
+
+<h2>P1.2 Snapshot first. Always.</h2>
+<div class="box b-ok">
+  <span class="bt">Do this before any other step</span>
+  <p>Power off WinServer in VirtualBox and take a snapshot named
+  <code>winserver-clean-30sep</code>. Everything from here on is reversible in about a minute, which
+  turns every remaining risk into a non-event.</p>
+</div>
+
+<h2>P1.3 Give it internet, or commit to air-gap &mdash; your choice</h2>
+
+<h3>Option A &mdash; add a NAT adapter (recommended)</h3>
+<p>Same pattern you used for Kali yesterday: keep <code>intnet</code> for lab traffic, add NAT
+purely for internet. Requires the VM powered off.</p>
+
+<pre>VBoxManage modifyvm "WinServer" --nic1 none
+VBoxManage modifyvm "WinServer" --nic2 intnet --cable2 on
+VBoxManage modifyvm "WinServer" --nic3 nat   --cable3 on
+VBoxManage modifyvm "WinServer" --natpf3 <span class="prm">"winrm,tcp,127.0.0.1,15985,,5985"</span>
+VBoxManage startvm "WinServer" --type headless</pre>
+
+<div class="box b-warn">
+  <span class="bt">Get the adapter slot number right &mdash; you have been here before</span>
+  <p><code>--natpf1</code>, <code>--natpf2</code>, <code>--natpf3</code> refer to the
+  <strong>adapter slot number</strong>, not to &ldquo;the NAT one&rdquo;. Above I moved intnet to
+  slot&nbsp;2 and NAT to slot&nbsp;3, so the forward uses <code>--natpf3</code>. Using the wrong
+  number writes the rule into a disabled block, reports <em>no error at all</em>, and does
+  nothing. Always verify:</p>
+<pre>VBoxManage showvminfo "WinServer" | Select-String <span class="prm">"NIC|Rule"</span></pre>
+  <p style="margin-top:2mm">Simpler alternative: keep intnet in slot&nbsp;1, add NAT in slot&nbsp;2,
+  and use <code>--nic2 nat --natpf2</code> exactly as you did for Kali. Either is fine &mdash; just
+  match the number to the slot.</p>
+</div>
+
+<h3>Option B &mdash; stay air-gapped and sideload the agent</h3>
+<p>More realistic for a hardened server, and it forces you to learn offline installation &mdash; a
+genuinely useful skill. No adapter changes at all.</p>
+
+<p>On the Windows host, download the agent installer once:</p>
+<pre># PowerShell on your Windows 11 host
+curl.exe -o "$env:USERPROFILE\Downloads\wazuh-agent-4.14.8-1.msi" `
+  https://packages.wazuh.com/4.x/windows/wazuh-agent-4.14.8-1.msi</pre>
+
+<p>Share that folder with the VM through VirtualBox &mdash; run this on the <em>host</em> shell:</p>
+<pre>VBoxManage sharedfolder add "WinServer" <span class="prm">"wazuhmsi"</span> `
+  --hostpath "C:\Users\pc\Downloads"</pre>
+
+<p>Then inside the VM, from an Administrator PowerShell. Guest Additions maps the share to
+<code>\\tsclient\wazuhmsi</code>:</p>
+<pre>msiexec.exe /i "\\tsclient\wazuhmsi\wazuh-agent-4.14.8-1.msi" /q `
+  WAZUH_MANAGER=<span class="prm">"10.0.0.40"</span> WAZUH_AGENT_NAME=<span class="prm">"winsrv-01"</span> `
+  WAZUH_AGENT_GROUP=<span class="prm">"windows,servers"</span></pre>
+
+<p>Verify the share is visible from inside the VM before trying the install:</p>
+<pre>Get-ChildItem "\\tsclient\wazuhmsi" | Select-Object -First 5 Name, Length</pre>
+
+<h3>Which to pick</h3>
+<table class="d">
+  <tr><th style="width:24%"></th><th>Option A (NAT)</th><th>Option B (air-gap)</th></tr>
+  <tr><td><strong>Ease of lab use</strong></td><td>Much easier &mdash; you can install anything</td><td>Every tool needs sideloading</td></tr>
+  <tr><td><strong>Realism</strong></td><td>Low &mdash; real servers rarely have both</td><td>High &mdash; matches production segmentation</td></tr>
+  <tr><td><strong>Skills gained</strong></td><td>Networking, Windows Update</td><td>Offline deployment, which is what you would actually do at scale</td></tr>
+  <tr><td><strong>Recommendation</strong></td><td>Do this one first</td><td>Try it for the hardening phase, when you want a clean, quiet system</td></tr>
+</table>
+
+<h2>P1.4 Detach the ISO and set a static address</h2>
+
+<h3>Detach the install media</h3>
+<pre>VBoxManage modifyvm "WinServer" --medium none
+VBoxManage showvminfo "WinServer" | Select-String <span class="prm">"DVD|ISO"</span></pre>
+<p>Should now show no DVD image attached. This prevents a boot-into-setup surprise later.</p>
+
+<h3>Set the lab IP</h3>
+<p>Open an <strong>Administrator</strong> PowerShell on the server. First find out what your adapter
+is actually called &mdash; do not guess:</p>
+
+<pre>Get-NetAdapter | Format-Table Name, InterfaceDescription, MacAddress, Status -AutoSize
+Get-NetIPAddress -AddressFamily IPv4 | Format-Table InterfaceAlias, IPAddress, PrefixLength</pre>
+
+<div class="box b-info">
+  <span class="bt">The lesson from Ubuntu, applied to Windows</span>
+  <p>On Ubuntu the netplan file silently discarded your static IP because of one misspelled key.
+  Windows has the same class of problem: an address applied incorrectly survives until the next
+  reboot and then vanishes. The permanent methods are the <code>NetTCPIP</code> cmdlets or
+  <code>netsh interface ip set address</code>. Verify with a reboot, exactly as you did before.</p>
+</div>
+
+<pre># 10.0.0.50 on the intnet adapter. Replace "Ethernet" with YOUR adapter name from above.
+Set-NetIPInterface -InterfaceAlias "Ethernet" -Dhcp Disabled
+New-NetIPAddress -InterfaceAlias "Ethernet" -IPAddress 10.0.0.50 -PrefixLength 24
+
+# Equivalent, if you prefer netsh:
+netsh interface ipv4 set address name="Ethernet" static 10.0.0.50 255.255.255.0</pre>
+
+<p>Verify &mdash; and verify again <em>after a reboot</em>:</p>
+<pre>Get-NetIPAddress -InterfaceAlias "Ethernet" -AddressFamily IPv4
+ipconfig</pre>
+
+<h3>Name it properly</h3>
+<pre>Rename-Computer -NewName "WINSRV-01"; Restart-Computer</pre>
+<p>Never work with a server called <code>WIN-4F2K9D8Q7P3A</code>. Hostnames appear in every log
+line, every alert and every report.</p>
+
+<h2>P1.5 First-boot housekeeping</h2>
+<table class="d wrap">
+  <tr><th style="width:32%">Task</th><th>Why it matters here</th></tr>
+  <tr><td>Set the timezone deliberately</td><td>Every alert timestamp is compared against your notes. A wrong timezone makes a whole investigation confusing.</td></tr>
+  <tr><td>Install updates, then a second reboot</td><td>You want a stable baseline before measuring anything. Most updates need two reboots.</td></tr>
+  <tr><td>Create a named admin account</td><td>Daily use of the built-in <code>Administrator</code> is itself a finding. Create <code>labadmin</code>, use it, then disable the built-in account (P4.1).</td></tr>
+  <tr><td>Install OpenSSH Server</td><td>Server 2022 does not include it, and you want SSH from Kali and the host.<br><code>Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0</code><br><code>Start-Service sshd; Set-Service sshd -StartupType Automatic</code><br><code>New-NetFirewallRule -DisplayName "OpenSSH" -Direction Inbound -Protocol TCP -LocalPort 22 -Action Allow</code></td></tr>
+  <tr><td>Check Defender is actually running</td><td>Part&nbsp;P4.7. Some evaluation images ship with it off.</td></tr>
+  <tr><td>Record your baseline</td><td>SCA pass rate and alert count <em>now</em>. You cannot show improvement without a before.</td></tr>
+</table>
+
+<div class="box b-ok">
+  <span class="bt">Your emergency command channel, on Windows too</span>
+  <p>WinServer has Guest Additions, so the out-of-band channel from Volume&nbsp;1 works here &mdash;
+  and it needs neither SSH nor networking. It is how you recover when the firewall drops your SSH
+  port, which will happen at least once:</p>
+<pre>VBoxManage guestcontrol "WinServer" run --username .\labadmin --password &lt;pw&gt; `
+  --exe "C:\Windows\System32\cmd.exe" -- /c "whoami"</pre>
+</div>
+
+<!-- ==================== P2 ==================== -->
+<h1 class="sec">P2 &nbsp;Enroll it in Wazuh</h1>
+
+<p class="lead">Once this works, everything from Part&nbsp;P5 onwards becomes possible: you can
+see what the server is doing instead of guessing at it.</p>
+
+<h2>P2.1 The enrolment flow, in order</h2>
+<div class="flow">
+  <span class="n">1. Register</span><span class="ar">&rarr;</span>
+  <span class="n">2. Install agent</span><span class="ar">&rarr;</span>
+  <span class="n">3. Open firewall 1514</span><span class="ar">&rarr;</span>
+  <span class="n">4. Verify Active</span><span class="ar">&rarr;</span>
+  <span class="n">5. Confirm alerts flow</span>
+</div>
+
+<div class="box b-bad">
+  <span class="bt">Step 3 is where this almost always fails. Do not skip it.</span>
+  <p>Windows Firewall blocks inbound TCP by default. The Wazuh agent installs cleanly, starts,
+  shows as running &mdash; and silently sends nothing. This is the most common Windows enrolment
+  failure there is, and it looks exactly like a Wazuh problem.</p>
+</div>
+
+<h2>P2.2 Register the agent</h2>
+<p>In the dashboard: <strong>Agents</strong> &rarr; <strong>Add agent</strong> &rarr;
+<strong>Windows</strong>. Fill in:</p>
+<ul>
+  <li><strong>Name:</strong> <code>winsrv-01</code> &mdash; matches the hostname you set in P1.4</li>
+  <li><strong>IP:</strong> <code>10.0.0.50/24</code></li>
+  <li><strong>Tags:</strong> <code>os.windows,role.server,env.lab</code></li>
+</ul>
+<p>Copy the generated PowerShell command. Note the key is unique to this agent.</p>
+
+<h2>P2.3 Install the agent</h2>
+<p>On WinServer, in an Administrator PowerShell. Either use the command the dashboard generated,
+or do it in explicit steps so you can see what is happening:</p>
+
+<pre># 1. download (Option A with NAT). Skip this line if you sideloaded.
+Invoke-WebRequest -Uri https://packages.wazuh.com/4.x/windows/wazuh-agent-4.14.8-1.msi `
+  -OutFile $env:TEMP\wazuh-agent.msi
+
+# 2. install silently, pointing at the lab IP
+$msi = "$env:TEMP\wazuh-agent.msi"
+Start-Process msiexec.exe -ArgumentList @(
+  "/i", $msi, "/quiet",
+  "WAZUH_MANAGER=10.0.0.40",
+  "WAZUH_AGENT_NAME=winsrv-01",
+  "WAZUH_AGENT_GROUP=windows,servers"
+) -Wait
+
+# 3. start it and make it survive reboot
+Set-Service -Name "Wazuh" -StartupType Automatic
+Start-Service -Name "Wazuh"
+Get-Service -Name "Wazuh"     <span class="cmt"># expect: Running</span></pre>
+
+<p>Where the agent keeps its configuration, mirroring Linux:</p>
+<pre>Get-Content "C:\Program Files (x86)\ossec-agent\ossec.conf" |
+  Select-String <span class="prm">"server|port|agent_name|labels"</span>
+Get-Content "C:\Program Files (x86)\ossec-agent\wazuh-agent.conf" | Select-Object -First 40</pre>
+
+<h2>P2.4 Open the firewall &mdash; the step everyone misses</h2>
+<pre># Inbound rule for the agent listener
+New-NetFirewallRule -DisplayName "Wazuh Agent 1514" `
+  -Direction Inbound -Action Allow -Protocol TCP -LocalPort 1514 -Profile Any
+
+# Optional: restrict RDP to the lab network only, never from anywhere
+New-NetFirewallRule -DisplayName "RDP from lab net only" `
+  -Direction Inbound -Action Allow -Protocol TCP -LocalPort 3389 `
+  -RemoteAddress 10.0.0.0/24 -Profile Any
+
+# Confirm both
+Get-NetFirewallRule -DisplayName "Wazuh*" | Format-Table DisplayName, Enabled, Direction, Action -AutoSize
+Get-NetFirewallProfile  | Format-Table Name, Enabled, DefaultInboundAction -AutoSize</pre>
+
+<div class="box b-info">
+  <span class="bt">Why only inbound 1514, and nothing else</span>
+  <p>The agent <em>initiates</em> connections out to the manager on port 1514 and receives replies.
+  Outbound is allowed by default, so that direction needs no rule. The inbound 1514 rule lets the
+  manager accept a push connection and makes troubleshooting from the manager straightforward.
+  Do <strong>not</strong> expose 55000 or 9200 &mdash; those are the manager API and the indexer,
+  and opening them to a lab subnet is a real and extremely common mistake.</p>
+</div>
+
+<h2>P2.5 Verify, properly</h2>
+<pre># 1. Is it listening?
+netstat -ano | Select-String <span class="prm">":1514|:55000"</span>
+
+# 2. Is the service running and set to auto?
+Get-Service Wazuh | Format-Table Name, Status, StartType -AutoSize
+
+# 3. Read the agent's own log - this tells you exactly what it is doing
+Get-Content "C:\Program Files (x86)\ossec-agent\wazuh-agent.log" -Tail 30
+
+# 4. Can it reach the manager? (this is the real test)
+Test-NetConnection -ComputerName 10.0.0.40 -Port 1514</pre>
+
+<table class="d">
+  <tr><th style="width:52%">If you see</th><th>It means</th></tr>
+  <tr><td class="mono">TcpTestSucceeded : True</td><td>Network path is fine. If alerts still do not flow, the problem is Wazuh-side.</td></tr>
+  <tr><td class="mono">Timestamps in wazuh-agent.log advancing</td><td>Agent is alive and working.</td></tr>
+  <tr><td class="mono">Enrolled new agent with name: winsrv-01</td><td>Registration succeeded.</td></tr>
+  <tr><td class="mono">ERROR: (4101): Waiting for server response</td><td>Registered, but the manager is not answering. Check <code>agent_control -l</code> on SIEM-Ubuntu.</td></tr>
+  <tr><td class="mono">Could not connect to server</td><td>Wrong manager IP, the firewall, or a routing problem on intnet.</td></tr>
+  <tr><td class="mono">Key mismatch / invalid key</td><td>The key in the local config does not match the manager. Reset with <code>manage_agents -R</code> and reinstall.</td></tr>
+</table>
+
+<h2>P2.6 Confirm in the dashboard</h2>
+<p>Refresh <strong>Agents</strong>. Status should go <span class="tag t-md">Pending</span> &rarr;
+<span class="tag t-ok">Active</span> within about 30 seconds. Then verify real data, not just a
+heartbeat:</p>
+
+<pre>rule.level:&gt;=0 AND agent.name:"winsrv-01"</pre>
+<p>On a fresh server you should immediately see events from the <strong>System</strong> channel
+(service starts, boot), <strong>Application</strong>, and &mdash; once auditing is on in
+Part&nbsp;P4.4 &mdash; <strong>Security</strong>. If you see only a heartbeat and nothing else, the
+agent is connected but has nothing interesting to report yet &mdash; which is exactly the state you
+want to be in before hardening.</p>
+
+<h2>P2.7 Add labels so filtering stays sane</h2>
+<pre># In the dashboard: Agents -> winsrv-01 -> Labels
+# or via the API from SIEM-Ubuntu
+curl -sk -X POST <span class="prm">"https://localhost:55000/agents/002/labels"</span> `
+  -H <span class="prm">"Authorization: Bearer $TOKEN"</span> -H <span class="prm">'Content-Type: application/json'</span> `
+  -d <span class="prm">'{"labels":["env.lab","os.windows","os.server2022"]}'</span></pre>
+<p>Within a few weeks you will have many agents and no memory of what any of them are. Labels are
+how you answer &ldquo;show me every domain controller&rdquo; without remembering names.</p>
+
+<!-- ==================== P3 ==================== -->
+<h1 class="sec">P3 &nbsp;Audit it from Kali (read-only)</h1>
+
+<p class="lead">Before you change anything, know what you are dealing with. This whole part is
+observation only &mdash; nothing here modifies the server. It does generate log events, which is
+useful: you are building the alert baseline from Part&nbsp;P5 as a side effect.</p>
+
+<h2>P3.1 Reachability from Kali</h2>
+<pre>ip -br a                                  <span class="cmt"># you are 10.0.0.30</span>
+ping -c3 10.0.0.50
+ip neigh | grep 10.0.0.50                 <span class="cmt"># confirm the MAC matches WinServer</span></pre>
+<p>Expect <code>08:00:27:f7:2c:54</code> &mdash; the MAC from the VM config. A different MAC means
+you are looking at a different machine, or an address conflict has crept back in.</p>
+
+<h2>P3.2 Service and version audit</h2>
+<pre># Fast: the ports a Windows Server normally has open
+sudo nmap -Pn -p 53,88,135,139,389,445,464,636,3268,3269,3389,5985,9389 \
+     --open 10.0.0.50
+
+# Full picture: every TCP port, version detection, default scripts
+sudo nmap -Pn -sV -sC -p- --open 10.0.0.50 -oN ~/nmap-winsrv-full.txt
+
+# Just the standard set, quick
+sudo nmap -Pn -sV -F 10.0.0.50</pre>
+
+<table class="d wrap">
+  <tr><th style="width:14%">Port</th><th style="width:22%">Service</th><th>Does the lab need it?</th></tr>
+  <tr><td class="mono">53</td><td>DNS</td><td>Only if you promote this to a domain controller (P9). Remove otherwise.</td></tr>
+  <tr><td class="mono">88</td><td>Kerberos</td><td>Domain controller only.</td></tr>
+  <tr><td class="mono">135</td><td>RPC endpoint mapper</td><td>Used by many Windows services. Do not disable &mdash; breaking it breaks management tools.</td></tr>
+  <tr><td class="mono">139</td><td>NetBIOS session</td><td><strong>Should be blocked.</strong> Legacy and unnecessary on a modern network.</td></tr>
+  <tr><td class="mono">389</td><td>LDAP</td><td>Domain controller only.</td></tr>
+  <tr><td class="mono">445</td><td>SMB</td><td>Required, if only for administration. This is the one that matters most to harden.</td></tr>
+  <tr><td class="mono">464</td><td>Kerberos password change</td><td>Domain controller only.</td></tr>
+  <tr><td class="mono">3389</td><td>RDP</td><td>Only if you need the GUI. Consider removing and using SSH instead.</td></tr>
+  <tr><td class="mono">5985</td><td>WinRM</td><td>Only if you manage it remotely with PowerShell.</td></tr>
+  <tr><td class="mono">9389</td><td>AD DS</td><td>Domain controller only.</td></tr>
+</table>
+
+<div class="box b-info">
+  <span class="bt">Read the scan output as a configuration review, not a score</span>
+  <p>An open port on a lab server is not automatically a problem &mdash; you need it for
+  something. The question is always &ldquo;does it need to be reachable, from where, and is it
+  configured safely?&rdquo; A default Windows Server answering on 445 to the whole lab with SMBv1
+  enabled and no signing required is a finding. A 445 open only to 10.0.0.30 with signing required
+  is fine.</p>
+</div>
+
+<h2>P3.3 SMB configuration audit</h2>
+<pre>sudo nmap -Pn -p 445 --script \
+  smb-os-discovery,smb-protocols,smb2-security-mode,smb2-time,smb-enum-shares \
+  10.0.0.50</pre>
+
+<table class="d wrap">
+  <tr><th style="width:32%">Script</th><th>What a good result looks like</th></tr>
+  <tr><td class="mono">smb-os-discovery</td><td>Confirms the build. Compare with 20348.587 in your VM config.</td></tr>
+  <tr><td class="mono">smb-protocols</td><td><strong>SMBv1 should be absent.</strong> If it reports <code>SMBv1 enabled</code>, that is finding #1.</td></tr>
+  <tr><td class="mono">smb2-security-mode</td><td><strong>SMB signing should be required or at least enabled.</strong> &ldquo;disabled&rdquo; is finding #2.</td></tr>
+  <tr><td class="mono">smb-enum-shares</td><td>Compare against what you expect. Any <code>ADMIN$</code> / <code>C$</code> reachable from the lab is worth noting.</td></tr>
+</table>
+
+<pre># Enumerate shares with a null session (read-only)
+smbclient -L //10.0.0.50 -N
+smbmap -H 10.0.0.50
+
+# OS and domain details, no credentials needed
+rpcclient -U "" -N -c "srvinfo" 10.0.0.50</pre>
+
+<div class="box b-warn">
+  <span class="bt">Record which of these succeeded</span>
+  <p>Whether anonymous share listing works is itself a finding. On a hardened server it should
+  fail. Note it now, then note it again in Part&nbsp;P5 after you have locked it down &mdash; the
+  difference is your evidence.</p>
+</div>
+
+<h2>P3.4 Password policy, read from both sides</h2>
+
+<h3>From the server itself (authoritative)</h3>
+<pre>net accounts
+Get-LocalUser | Format-Table Name, Enabled, PasswordExpires, PasswordLastSet -AutoSize
+Get-LocalGroupMember -Group "Administrators" | Format-Table Name, PrincipalSource -AutoSize</pre>
+
+<h3>From Kali, over the network</h3>
+<pre># confirms the policy from outside - useful for your report
+netexec smb 10.0.0.50 --pass-pol</pre>
+<p>This reads the policy without needing any credentials. Note the result and compare it to
+<code>net accounts</code> on the server. If they differ, the network view is the one an outsider
+would have.</p>
+
+<h2>P3.5 Known-vulnerability check</h2>
+<pre>sudo nmap -Pn -p 445 --script vuln 10.0.0.50 -oN ~/nmap-vuln-winsrv.txt
+less ~/nmap-vuln-winsrv.txt</pre>
+<p>This queries public vulnerability data for the services it detects. Treat the output as a prompt
+to investigate, not as proof. A CVE listed means &ldquo;this version is associated with a known
+issue&rdquo; &mdash; you still need to confirm it applies, then fix it in Part&nbsp;P4 or document
+why it does not.</p>
+
+<h2>P3.6 Write down your baseline</h2>
+<div class="box b-ok">
+  <span class="bt">Before touching anything, record this</span>
+  <table class="d" style="margin-top:2mm">
+    <tr><th style="width:56%">Item</th><th>Observed value</th></tr>
+    <tr><td>Open ports</td><td></td></tr>
+    <tr><td>SMBv1 supported?</td><td></td></tr>
+    <tr><td>SMB signing</td><td></td></tr>
+    <tr><td>SMB encryption</td><td></td></tr>
+    <tr><td>Anonymous share listing</td><td></td></tr>
+    <tr><td>Minimum password length</td><td></td></tr>
+    <tr><td>Password complexity</td><td></td></tr>
+    <tr><td>Account lockout threshold</td><td></td></tr>
+    <tr><td>Guest account enabled?</td><td></td></tr>
+    <tr><td>Firewall profiles enabled</td><td></td></tr>
+    <tr><td>SCA pass rate (System Audit &rarr; CIS)</td><td></td></tr>
+    <tr><td>Wazuh alert count from winsrv-01</td><td></td></tr>
+  </table>
+</div>
+<p>This table is your &ldquo;before&rdquo;. Part&nbsp;P4 changes it and Part&nbsp;P5 proves you can
+see the change.</p>
+
+<!-- ==================== P4 ==================== -->
+<h1 class="sec">P4 &nbsp;Harden it &mdash; the main event</h1>
+
+<p class="lead">Ordered roughly by impact on your SIEM. Sections P4.1 to P4.3 are good practice on
+any server; <strong>P4.4 is the one your Wazuh lab cannot work without</strong>.</p>
+
+<div class="box b-bad">
+  <span class="bt">Take a snapshot before starting this part</span>
+  <p>Several of these changes are not easily reversible, particularly Credential Guard and LSA
+  protection. Power off and snapshot as <code>winserver-audited-30sep</code>. Recovering a server
+  you cannot log into is a genuinely bad afternoon, and this makes it impossible.</p>
+</div>
+
+<h2>P4.1 Accounts and passwords</h2>
+
+<pre># --- current state ---
+net accounts
+Get-LocalUser | Format-Table Name, Enabled -AutoSize
+
+# --- password policy: min 14 chars, max age 60 days ---
+net accounts /minpwlen:14 /minpwage:1 /maxpwage:60 /lengthenable:yes
+
+# --- account lockout: 5 failures, 15 minutes ---
+net accounts /lockoutthreshold:5 /lockoutduration:15 /lockoutobservation:30
+
+# --- disable the Guest account ---
+net user guest /active:no
+
+# --- who is actually an admin? ---
+Get-LocalGroupMember -Group "Administrators" | Format-Table Name, PrincipalSource -AutoSize
+net localgroup Administrators</pre>
+
+<table class="d wrap">
+  <tr><th style="width:30%">Control</th><th>Why</th></tr>
+  <tr><td>Minimum length &ge; 14</td><td>The single most effective password control. Length beats complexity rules &mdash; people reuse complex passwords and guess long ones.</td></tr>
+  <tr><td>Maximum age 30&ndash;60 days</td><td>Forces rotation. There is real disagreement in the industry about whether this helps; the CIS benchmark requires it, so the benchmark wants it.</td></tr>
+  <tr><td>Lockout at 5 / 15 minutes</td><td>Turns online guessing into a non-viable strategy. <strong>Know the trade-off:</strong> it can also be used to lock out a legitimate user. That is a known denial-of-service consideration you should be able to discuss in an interview.</td></tr>
+  <tr><td>Guest disabled</td><td>Guest has almost no privileges and is a target because it is enabled by default.</td></tr>
+</table>
+
+<div class="box b-info">
+  <span class="bt">Use a named admin account, not <code>Administrator</code></span>
+  <p>Create <code>labadmin</code>, add it to Administrators, use it for everything, then disable
+  the built-in account. This is a standard CIS recommendation: a guessable, always-enabled,
+  universally-known account name is a gift. Be certain your <code>labadmin</code> credentials work
+  before disabling <code>Administrator</code>.</p>
+<pre>New-LocalUser -Name "labadmin" -Password (Read-Host -AsSecureString) `
+  -Description "Lab admin account"
+Add-LocalGroupMember -Group "Administrators" -Member "labadmin"
+# test the new login FIRST, in a second session, then:
+Disable-LocalUser -Name "Administrator"</pre>
+</div>
+
+<h3>Remove stale accounts</h3>
+<pre>Get-LocalUser | Where-Object { $_.LastLogon -lt (Get-Date).AddMonths(-6) }
+Get-LocalUser | Where-Object { $_.PasswordLastSet -eq $null }   <span class="cmt"># never-set password</span></pre>
+
+<h2>P4.2 SMB hardening &mdash; the highest-value technical change</h2>
+
+<h3>Check the current configuration</h3>
+<pre>Get-SmbServerConfiguration | Format-List EnableSMB1Protocol, EnableSMB2Protocol, `
+  EncryptData, RequireSecuritySignature, EnableSecuritySignature, `
+  EnableAuthNullUser, EnableInsecureGuestLogons</pre>
+
+<h3>Apply</h3>
+<pre># 1. turn off SMBv1
+Get-WindowsOptionalFeature -Online -FeatureName SMB1Protocol
+Disable-WindowsOptionalFeature -Online -FeatureName SMB1Protocol -NoRestart
+
+# 2. require SMB signing on all server-side connections
+Set-SmbServerConfiguration -RequireSecuritySignature $true `
+                            -EnableSecuritySignature  $true -Force
+
+# 3. require SMB encryption for all shares
+Set-SmbServerConfiguration -EncryptData $true -Force
+
+# 4. deny null / anonymous sessions
+Set-SmbServerConfiguration -EnableAuthNullUser $false -Force
+Set-SmbServerConfiguration -EnableInsecureGuestLogons $false -Force</pre>
+
+<p>Verify &mdash; the same command you used to read it should now report the new values:</p>
+<pre>Get-SmbServerConfiguration | Format-List EnableSMB1Protocol, RequireSecuritySignature, EncryptData</pre>
+
+<div class="box b-warn">
+  <span class="bt">Test administration after this, not before</span>
+  <p>Requiring SMB signing or encryption will break management tools that connect to
+  <code>\\WINSRV-01\C$</code> from a machine that does not support the new requirement. If you
+  administer from your Windows host, verify a remote administration path works <em>before</em> you
+  apply it. SSH is unaffected, which is another good reason to have installed it in P1.5.</p>
+</div>
+
+<h3>Restrict anonymous access in the registry</h3>
+<pre>$lsa = "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa"
+Set-ItemProperty $lsa -Name RestrictAnonymous       -Value 1
+Set-ItemProperty $lsa -Name RestrictAnonymousSAM    -Value 1
+Set-ItemProperty $lsa -Name restrictnullsessions    -Value 1
+Set-ItemProperty $lsa -Name EveryoneIncludesAnonymous -Value 0
+Set-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters" `
+  -Name RestrictNullSessAccess -Value 1
+
+# confirm
+Get-ItemProperty $lsa | Select-Object RestrictAnonymous, RestrictAnonymousSAM, restrictnullsessions</pre>
+
+<h2>P4.3 Protecting credentials on the server itself</h2>
+
+<h3>LSA protection (RunAsPPL)</h3>
+<p>Without this, software running on the server can read process memory and extract credentials.
+With it, the Local Security Authority runs as a protected process and that technique fails.</p>
+<pre>$lsa = "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa"
+Set-ItemProperty $lsa -Name RunAsPPL     -Value 1
+Set-ItemProperty $lsa -Name RunAsPPLBoot -Value 1
+Restart-Computer</pre>
+
+<h3>Credential Guard</h3>
+<p>Runs the LSA in a container isolated from the rest of the OS, using virtualisation-based
+security. Stronger than LSA protection, and the two work well together.</p>
+<pre>Enable-WindowsOptionalFeature -Online -FeatureName CredentialGuard -All</pre>
+<p>Verify with Microsoft's own tool &mdash; it prints a table of which protections are active:</p>
+<pre>C:\Windows\System32\lsaasg.exe /query</pre>
+<p>Expect <code class="out">Credential Guard: Enabled</code> and
+<code class="out">LSA protection (RunAsPPL): Enabled</code>. A reboot is generally needed for the
+full effect.</p>
+
+<div class="box b-info">
+  <span class="bt">Why these two matter, in one sentence</span>
+  <p>Both exist to stop a process that <em>already has administrator</em> from reading plaintext
+  credentials out of memory. That is the most common technique in real Windows intrusions &mdash;
+  and it is why &ldquo;the attacker is already an admin&rdquo; is not the end of the story.</p>
+</div>
+
+<h2>P4.4 Audit policy &mdash; THE most important section for your SIEM</h2>
+
+<div class="box b-bad">
+  <span class="bt">Read this part twice</span>
+  <p>Without this, Wazuh will show you almost nothing about Windows. With it, you can detect
+  logons, privilege changes, file access, process creation and log tampering &mdash; which is the
+  entire difference between a Windows machine in your SIEM and a black box in it.</p>
+</div>
+
+<h3>Back up the current policy first</h3>
+<pre>auditpol /backup /file:C:\Windows\Temp\audit-backup.csv
+auditpol /get /category:* | Out-File C:\Windows\Temp\audit-current.txt
+auditpol /get /subcategory:*</pre>
+
+<div class="box b-ok">
+  <span class="bt">This one line makes the whole section reversible</span>
+  <p><code>auditpol /restore /file:C:\Windows\Temp\audit-backup.csv</code> puts everything back
+  exactly as it was. Do the backup before anything else in this section, no exceptions.</p>
+</div>
+
+<h3>Turn on the auditing Wazuh needs</h3>
+<pre># --- authentication: the foundation ---
+auditpol /set /subcategory:<span class="prm">"Logon"</span> /success:enable /failure:enable        <span class="cmt"># 4624 / 4625</span>
+auditpol /set /subcategory:<span class="prm">"Logoff"</span> /success:enable                       <span class="cmt"># 4634 / 4635</span>
+auditpol /set /subcategory:<span class="prm">"Special Logon"</span> /success:enable                 <span class="cmt"># 4672  privileged logon</span>
+auditpol /set /subcategory:<span class="prm">"Logon (Service Package)"</span> /success:enable     <span class="cmt"># 4648  explicit creds</span>
+auditpol /set /subcategory:<span class="prm">"Credential Validation"</span> /success:enable /failure:enable <span class="cmt"># 4776 NTLM</span>
+auditpol /set /subcategory:<span class="prm">"Account Lockout"</span> /failure:enable               <span class="cmt"># 4740  lockout fired</span>
+
+# --- privilege and account changes: the high-value ones ---
+auditpol /set /subcategory:<span class="prm">"Security Group Management"</span> /success:enable    <span class="cmt"># 4728 / 4732 / 4756</span>
+auditpol /set /subcategory:<span class="prm">"User Account Management"</span> /success:enable      <span class="cmt"># 4720 / 4722 / 4724 / 4726</span>
+auditpol /set /subcategory:<span class="prm">"Audit Policy Change"</span> /success:enable          <span class="cmt"># 4719  auditing changed!</span>
+
+# --- file and object access ---
+auditpol /set /subcategory:<span class="prm">"Detailed File Share"</span> /success:enable          <span class="cmt"># 5140</span>
+auditpol /set /subcategory:<span class="prm">"Other Object Access Events"</span> /success:enable <span class="cmt"># 5145  noisy - see note</span>
+
+# --- process creation ---
+auditpol /set /subcategory:<span class="prm">"Process Creation"</span> /success:enable           <span class="cmt"># 4688  HIGH VOLUME</span>
+
+# --- system state ---
+auditpol /set /subcategory:<span class="prm">"Security State Change"</span> /success:enable      <span class="cmt"># 4616</span>
+auditpol /set /subcategory:<span class="prm">"Other Account Logon Events"</span> /success:enable <span class="cmt"># 4647</span>
+auditpol /set /subcategory:<span class="prm">"Security Group Membership"</span> /success:enable <span class="cmt"># 4727 / 4729</span></pre>
+
+<h3>Include the command line in process creation events</h3>
+<p>Without this, event 4688 tells you <em>what</em> ran but not <em>with what arguments</em> &mdash;
+which is most of the useful information.</p>
+
+<pre>Set-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" `
+  -Name AuditProcessCreationIncludeCmdLine_Enabled -Value 1
+
+# Windows 10 / Server 2016 and later: also required for the full command line
+Set-ItemProperty "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Sys\CmdLine" `
+  -Name AuditAdditionalProc -Value 1</pre>
+
+<div class="box b-warn">
+  <span class="bt">Volume warning &mdash; read before enabling process auditing</span>
+  <p>4688 with command lines generates thousands of events per hour on a busy machine. On your
+  4&nbsp;GB lab server it is manageable, but it will be the dominant source of alerts, it will
+  enlarge your indexer indices, and it will bury everything else unless you filter deliberately.
+  Enable it, look at the volume, and if it is overwhelming, disable it and rely on Sysmon instead
+  (Part&nbsp;P6), which gives comparable detail with less duplication. Document whichever you choose
+  and why &mdash; that judgement is the actual skill.</p>
+</div>
+
+<h3>Verify</h3>
+<pre>auditpol /get /subcategory:"Logon"
+auditpol /get /subcategory:"Security Group Management"
+auditpol /get /category:"Detailed Tracking"</pre>
+
+<div class="box b-info">
+  <span class="bt">How to prove auditing works, immediately, with nothing but your own actions</span>
+<pre>wevtutil qe Security /c:10 /rd:true /f:text | Select-String "4624|4672|4732"</pre>
+  <p>Do something privileged from a second session, then run that. That is the fastest possible
+  audit of whether your audit policy is doing its job.</p>
+</div>
+
+<h2>P4.5 Windows Firewall</h2>
+<pre># Current state - all three profiles; note which are even enabled
+Get-NetFirewallProfile | Format-Table Name, Enabled, DefaultInboundAction, DefaultOutboundAction -AutoSize
+
+# Harden: all profiles on, deny inbound by default
+Set-NetFirewallProfile -Profile Domain,Public,Private `
+  -Enabled True -DefaultInboundAction Block -DefaultOutboundAction Allow
+
+# Re-verify, and re-verify your Wazuh rule still exists
+Get-NetFirewallProfile | Format-Table Name, Enabled, DefaultInboundAction -AutoSize
+Get-NetFirewallRule -DisplayName "Wazuh*" | Format-Table DisplayName, Enabled -AutoSize</pre>
+
+<div class="box b-bad">
+  <span class="bt">Order of operations matters here</span>
+  <p><code>Set-NetFirewallProfile</code> can disturb existing rules. Create your inbound allows
+  <em>first</em> (P2.4), then set the profiles. Reverse the order and you can lock yourself out of
+  RDP &mdash; and with the built-in Administrator disabled, recovery becomes genuinely painful.
+  Keep the VirtualBox console open.</p>
+</div>
+
+<h3>Review what is exposed</h3>
+<pre>Get-NetFirewallRule -Direction Inbound -Enabled True -Action Allow |
+  Format-Table DisplayName, Profile -AutoSize
+
+Get-NetFirewallRule -DisplayName "Remote*" | Format-List DisplayName, Enabled, Profile</pre>
+
+<h2>P4.6 RDP</h2>
+<p>Two reasonable positions. Pick one and be able to justify it.</p>
+
+<h3>Option 1 &mdash; remove RDP entirely, manage over SSH</h3>
+<pre>Set-ItemProperty "HKLM:\System\CurrentControlSet\Control\Terminal Server" `
+  -Name fDenyTSConnections -Value 1
+Restart-Service -Name TermService -Force
+Disable-NetFirewallRule -DisplayName "Remote*Desktop*"</pre>
+
+<h3>Option 2 &mdash; keep RDP, but restrict it hard</h3>
+<pre># enable, with Network Level Authentication (the important part)
+Set-ItemProperty "HKLM:\System\CurrentControlSet\Control\Terminal Server" `
+  -Name fDenyTSConnections -Value 0
+Set-ItemProperty "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" `
+  -Name UserAuthentication -Value 1
+
+# no drive or clipboard redirection
+Set-ItemProperty "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" `
+  -Name fDisableCdm -Value 1</pre>
+
+<table class="d wrap">
+  <tr><th style="width:28%">Setting</th><th>Why</th></tr>
+  <tr><td>NLA (UserAuthentication=1)</td><td>Requires authentication <em>before</em> a session is created. Without it, RDP is reachable and consuming resources before any login is attempted &mdash; which is exactly how it gets abused.</td></tr>
+  <tr><td>fDisableCdm=1</td><td>Stops the client mapping local drives and clipboard into the server, closing an easy path for moving data in or out.</td></tr>
+  <tr><td>Firewall scoped to 10.0.0.0/24</td><td>RDP should not be reachable from an entire network. Scope it to the management segment.</td></tr>
+</table>
+
+<h2>P4.7 Defender</h2>
+<pre>Get-MpComputerStatus | Format-List AMServiceEnabled, AntivirusEnabled, `
+  RealTimeProtectionEnabled, BehaviorMonitorEnabled, IoavProtectionEnabled, `
+  AntivirusSignatureLastUpdated
+
+Get-MpPreference | Format-List DisableRealtimeMonitoring, ExclusionPath</pre>
+
+<pre># ensure real-time protection is on
+Set-MpPreference -DisableRealtimeMonitoring $false
+Set-MpPreference -DisableBehaviorMonitoring $false
+
+# update signatures
+Update-MpSignature</pre>
+
+<div class="box b-warn">
+  <span class="bt">Check exclusions on purpose</span>
+  <p><code>Get-MpPreference | Select ExclusionPath</code> deserves a proper look. Antivirus
+  exclusions are a classic attacker technique &mdash; adding one is a single command and it
+  disables your endpoint protection invisibly. It is also why &ldquo;Defender was disabled&rdquo; is
+  an incident, not a configuration note. Read the list and note anything you cannot explain.</p>
+</div>
+
+<h2>P4.8 PowerShell logging</h2>
+
+<p>PowerShell is the most heavily abused tool on Windows and the one you are least able to detect
+without planning for it. Log it before you need it.</p>
+
+<pre>$ps = "HKLM:\Software\Policies\Microsoft\Windows\PowerShell"
+New-Item -Path "$ps\ScriptBlockLogging" -Force | Out-Null
+Set-ItemProperty -Path "$ps\ScriptBlockLogging" -Name EnableScriptBlockLogging -Value 1
+Set-ItemProperty -Path "$ps\ScriptBlockLogging" -Name EnableModuleLogging -Value 1
+
+New-Item -Path "$ps\Transcription\FilePath" -Force | Out-Null
+Set-ItemProperty -Path "$ps\Transcription\FilePath" `
+  -Name FilePath -Value "C:\ProgramData\WazuhLOGS\PowerShellTranscripts"
+New-Item -ItemType Directory -Path "C:\ProgramData\WazuhLOGS" -Force | Out-Null</pre>
+
+<pre># 4104 = ScriptBlockLogging, 4103 = module logging
+wevtutil qe "Microsoft-Windows-PowerShell/Operational" /c:3 /rd:true /f:text |
+  Select-String "4104|ScriptBlock"</pre>
+
+<div class="box b-info">
+  <span class="bt">The proper way is Group Policy, and it is worth learning</span>
+  <p>The registry writes above are what you use standalone. With Group Policy
+  (<code>gpedit.msc</code> &rarr; Administrative Templates &rarr; Windows Components &rarr;
+  Microsoft Windows &rarr; PowerShell), the same settings are named checkboxes, which is far less
+  error-prone. Learn GPO properly when you promote this to a domain controller &mdash; it is the
+  central tool of Windows administration and you will use it constantly.</p>
+</div>
+
+<h2>P4.9 Re-audit and compare</h2>
+<p>Repeat Part&nbsp;P3 exactly. Same commands, same order, so the comparison is honest.</p>
+
+<pre>sudo nmap -Pn -p 445 --script smb-protocols,smb2-security-mode,smb-enum-shares 10.0.0.50
+smbclient -L //10.0.0.50 -N
+netexec smb 10.0.0.50 --pass-pol</pre>
+
+<div class="box b-ok">
+  <span class="bt">Build the before / after table</span>
+  <table class="d" style="margin-top:2mm">
+    <tr><th style="width:34%">Check</th><th>Before</th><th>After</th></tr>
+    <tr><td>SMBv1</td><td></td><td>absent</td></tr>
+    <tr><td>SMB signing</td><td></td><td>required</td></tr>
+    <tr><td>SMB encryption</td><td></td><td>required</td></tr>
+    <tr><td>Anonymous share list</td><td></td><td>denied</td></tr>
+    <tr><td>Min password length</td><td></td><td>14</td></tr>
+    <tr><td>Lockout threshold</td><td></td><td>5 / 15 min</td></tr>
+    <tr><td>Guest account</td><td></td><td>disabled</td></tr>
+    <tr><td>Null sessions (registry)</td><td></td><td>restricted</td></tr>
+    <tr><td>LSA protection</td><td></td><td>enabled</td></tr>
+    <tr><td>Credential Guard</td><td></td><td>enabled</td></tr>
+    <tr><td>Audit: group management</td><td></td><td>success enabled</td></tr>
+    <tr><td>Audit: process creation</td><td></td><td>enabled + cmdline</td></tr>
+    <tr><td>SCA pass rate</td><td></td><td></td></tr>
+  </table>
+</div>
+
+<p>This table, with the actual outputs pasted in, is the centrepiece of your portfolio. It
+demonstrates you understand <em>why</em> each control exists, which is what an interviewer is
+actually testing.</p>
+
+<!-- ==================== P5 ==================== -->
+<h1 class="sec">P5 &nbsp;Validate your detection</h1>
+
+<p class="lead">You now have a hardened server enrolled in a SIEM. But does the SIEM <em>actually
+see</em> things? This part proves it, with evidence, by generating controlled activity on your own
+host.</p>
+
+<div class="box b-info">
+  <span class="bt">What makes this legitimate, concretely</span>
+  <p>Every action below is performed by you, on a machine you own, using your own credentials or a
+  throwaway account you created for this purpose. You are not attacking anything &mdash; you are
+  <em>generating log events so your sensor has something to detect</em>. Nothing here tries to gain
+  access to anything, because you already have administrator. That is the whole difference.</p>
+</div>
+
+<h2>P5.1 The method</h2>
+<div class="flow">
+  <span class="n">Choose a technique</span><span class="ar">&rarr;</span>
+  <span class="n">Note the event ID</span><span class="ar">&rarr;</span>
+  <span class="n">Perform it</span><span class="ar">&rarr;</span>
+  <span class="n">Confirm Wazuh alerted</span><span class="ar">&rarr;</span>
+  <span class="n">Record the gap, or fix it</span>
+</div>
+
+<p>Every test ends with one of two honest outcomes, and <strong>both are valuable</strong>:
+&ldquo;detected, here is the alert&rdquo; or &ldquo;not detected, here is the rule I need to
+write.&rdquo; A SOC that has only ever seen detections on a dashboard it configured itself does not
+know its gaps. Finding and closing them is the job.</p>
+
+<h2>P5.2 Test 1 &mdash; Service and port discovery</h2>
+<p><strong>Why this matters:</strong> service enumeration is the standard first step of
+reconnaissance. If your SIEM cannot see it, it cannot see the next step either.</p>
+<pre># from Kali
+sudo nmap -Pn -sV -p- --open 10.0.0.50 --max-rate 500</pre>
+<p><strong>Where to look in Wazuh:</strong></p>
+<pre>agent.name:"winsrv-01" AND (rule.groups:portscan OR rule.description:*portscan*)
+agent.name:"winsrv-01" AND location:"win_eventchannel"</pre>
+<p><strong>Write down:</strong> did it alert? If not, that is a gap you close in Part&nbsp;P7.</p>
+
+<h2>P5.3 Test 2 &mdash; SMB share enumeration</h2>
+<pre># from Kali - read-only enumeration
+smbclient -L //10.0.0.50 -N
+smbmap -H 10.0.0.50</pre>
+<p>If your null-session restriction from P4.2 is working, these should now <strong>fail</strong>:</p>
+<pre class="tight"><span class="erro">tree connect failed: NT_STATUS_ACCESS_DENIED</span></pre>
+<p>That failure is a good result in itself, and it should still have produced an audit event on the
+server. Check:</p>
+<pre>data.win.system.eventID:5140 OR data.win.system.eventID:5145
+agent.name:"winsrv-01" AND data.win.system.eventID:5145</pre>
+<div class="box b-info">
+  <span class="bt">If you see nothing at all</span>
+  <p>That is a real and common finding: the &ldquo;Other Object Access Events&rdquo; audit
+  subcategory from P4.4 is what generates 5145. If it is not enabled, Wazuh is blind to file
+  access. Go back and enable it. This is exactly the kind of gap this part exists to find.</p>
+</div>
+
+<h2>P5.4 Test 3 &mdash; Failed authentication, and lockout</h2>
+<p>This is the test most people want to do first, so let us be precise about what it is.</p>
+
+<div class="step"><span class="sn">1</span><span class="st">Create a throwaway test account on the server</span>
+<pre># on WinServer, as labadmin
+$pw = ConvertTo-SecureString "A7#kQ2mZ9xR4tB1vC6nH8sD3fG5jL0w" -AsPlainText -Force
+New-LocalUser -Name "labtestuser" -Password $pw -PasswordNeverExpires $true `
+              -Description "Throwaway account used only for detection testing"
+Add-LocalGroupMember -Group "Users" -Member "labtestuser"</pre>
+<p>You will never need to type that password. You will deliberately send the <strong>wrong</strong>
+value, a fixed number of times, to a username you own. That produces log events. It is not an
+attack, there is no wordlist, and there is no discovery involved.</p>
+</div>
+
+<div class="step"><span class="sn">2</span><span class="st">Generate the failures from Kali, deliberately</span>
+<pre># ONE known-wrong password, a known number of times, to YOUR OWN account
+for i in $(seq 1 8); do
+  smbclient //10.0.0.50/IPC$ -U "labtestuser%definitely-not-the-password" -c "quit" &gt;/dev/null 2&gt;&amp;1
+  sleep 1
+done</pre>
+<div class="box b-warn" style="margin-top:2mm">
+  <span class="bt">Why this is fine, stated plainly</span>
+  <p>You own both endpoints. The account is one you just created. The password you send is one
+  wrong value you typed on purpose, not a list. The purpose is to make your SIEM emit &ldquo;failed
+  logon&rdquo; events so you can confirm it is ingesting and decoding them. Nothing here
+  discovers, targets, or gains access to anything.</p>
+</div>
+</div>
+
+<div class="step"><span class="sn">3</span><span class="st">Find the events in Wazuh</span>
+<pre>rule.groups:authentication_failed AND agent.name:"winsrv-01"
+data.win.system.eventID:4625 AND agent.name:"winsrv-01"</pre>
+<p>You should see roughly 8 failed logons, then a lockout event once you pass your threshold of
+5.</p>
+</div>
+
+<div class="step"><span class="sn">4</span><span class="st">Find the lockout &mdash; event 4740</span>
+<pre>data.win.system.eventID:4740</pre>
+<p>This is the one that matters most. A burst of failed logons is noise; an account actually being
+locked out is a signal. Check whether your frequency rule from Part&nbsp;P7 fires, and whether
+Wazuh's stock rules correlate the eight failures into one meaningful alert rather than eight
+separate ones. <strong>That judgement &mdash; noise versus signal &mdash; is the actual detection
+skill.</strong></p>
+</div>
+
+<div class="step"><span class="sn">5</span><span class="st">Clean up</span>
+<pre># on WinServer
+Unlock-LocalUser -Name "labtestuser"
+Remove-LocalUser -Name "labtestuser"</pre>
+<p>Leaving a test account with a known password on a server is precisely the thing you would
+criticise in someone else's configuration. Do not leave it.</p>
+</div>
+
+<h2>P5.5 Test 4 &mdash; Successful logon from a new source</h2>
+<pre># from Kali, with the REAL password, using your own account
+smbclient //10.0.0.50/IPC$ -U "labadmin%YourRealPassword" -c "quit"</pre>
+<pre># then in Wazuh
+data.win.system.eventID:4624 AND agent.name:"winsrv-01"
+data.win.system.eventID:4624 AND data.win.eventdata.LogonType:3   <span class="cmt"># type 3 = network</span></pre>
+
+<table class="d">
+  <tr><th style="width:20%">Logon type</th><th>Meaning</th></tr>
+  <tr><td class="mono">2</td><td>Interactive &mdash; someone at the console or via RDP</td></tr>
+  <tr><td class="mono">3</td><td>Network &mdash; accessing a share or a web application, or via <code>smbclient</code></td></tr>
+  <tr><td class="mono">4</td><td>Batch &mdash; scheduled task</td></tr>
+  <tr><td class="mono">5</td><td>Service &mdash; a Windows service starting</td></tr>
+  <tr><td class="mono">7</td><td>Unlock &mdash; unlocking a locked console</td></tr>
+  <tr><td class="mono">10</td><td>RemoteInteractive &mdash; RDP</td></tr>
+  <tr><td class="mono">11</td><td>CachedInteractive &mdash; offline logon to a cached account</td></tr>
+</table>
+<p>Also look for <strong>4648</strong> (explicit credential use). A network logon with explicit
+credentials is how <code>runas</code> and remote-execution tooling work, and it is a classic way to
+conceal which account is really being used.</p>
+
+<h2>P5.6 Test 5 &mdash; Privilege escalation indicator</h2>
+<p>Among the highest-value detections in Windows, because it is what usually follows a successful
+compromise.</p>
+
+<pre># on WinServer, as labadmin - add the throwaway test user to Administrators, then remove it
+Add-LocalGroupMember -Group "Administrators" -Member "labtestuser"
+# ... observe in Wazuh ...
+Remove-LocalGroupMember -Group "Administrators" -Member "labtestuser"</pre>
+
+<pre># in Wazuh
+data.win.system.eventID:4732 AND agent.name:"winsrv-01"
+data.win.system.eventID:4672 AND agent.name:"winsrv-01"   <span class="cmt"># special privileges</span></pre>
+
+<div class="box b-info">
+  <span class="bt">Why 4732 is the one to alert on</span>
+  <p>A member being added to the <strong>Administrators</strong> group is a far stronger signal
+  than almost any other single Windows event. In a real incident it is often the moment an intrusion
+  first becomes visible. It is the first rule you should write in Part&nbsp;P7.</p>
+</div>
+
+<h2>P5.7 Test 6 &mdash; Persistence via scheduled task</h2>
+<pre># on WinServer - create, observe, then delete
+schtasks /create /tn "LabDetectionTest" /tr "C:\Windows\System32\whoami.exe" `
+         /sc ondemand /ru labadmin /f
+schtasks /query /tn "LabDetectionTest" /v /fo list
+schtasks /delete /tn "LabDetectionTest" /f</pre>
+<pre># in Wazuh - 4698 lives in the Security channel
+data.win.system.eventID:4698 AND agent.name:"winsrv-01"
+data.win.system.eventID:4699 AND agent.name:"winsrv-01"   <span class="cmt"># task deleted</span></pre>
+<p>Scheduled tasks are among the most common persistence mechanisms. A rule that alerts on task
+creation in directories you control is high value and low noise.</p>
+
+<h2>P5.8 Test 7 &mdash; FIM: did anyone change a file?</h2>
+<p>Configure Windows FIM for the directories that matter, then touch a file and watch it appear.
+Edit <code>C:\Program Files (x86)\ossec-agent\ossec.conf</code>:</p>
+
+<pre>&lt;syscheck&gt;
+  &lt;frequency&gt;7200&lt;/frequency&gt;
+  &lt;directories&gt;
+    &lt;directory&gt;C:\ProgramData\WazuhLOGS&lt;/directory&gt;
+    &lt;directory&gt;C:\inetpub&lt;/directory&gt;
+    &lt;directory&gt;C:\Windows\Temp&lt;/directory&gt;
+    &lt;directory&gt;C:\Windows\System32\drivers\etc&lt;/directory&gt;
+  &lt;/directories&gt;
+  &lt;nodiff&gt;
+    &lt;path&gt;C:\ProgramData\WazuhLOGS\&lt;/path&gt;   <span class="cmt"># transcripts - too noisy to hash</span>
+  &lt;/nodiff&gt;
+  &lt;registry_ignore&gt;
+    &lt;arch&gt;64&lt;/arch&gt;
+    &lt;path&gt;Microsoft\Windows\CurrentVersion\Explorer&lt;/path&gt;
+  &lt;/registry_ignore&gt;
+&lt;/syscheck&gt;</pre>
+
+<pre>Restart-Service Wazuh
+Add-Content "C:\Windows\Temp\lab-fim-test.txt" "harmless test content"</pre>
+<pre># then in Wazuh
+syscheck.file:C:\Windows\Temp\lab-fim-test.txt
+location:syscheck AND agent.name:"winsrv-01"</pre>
+
+<h2>P5.9 Test 8 &mdash; Log tampering</h2>
+<p>One of the highest-value detections in all of security: if someone clears the audit log, they
+know they were noticed and are covering tracks.</p>
+
+<div class="box b-bad">
+  <span class="bt">Do this test with extreme care, and only once</span>
+  <p>Clearing the Security log destroys the history you need. Before doing it: (1) take a VM
+  snapshot, (2) export the current log, (3) be certain you have SSH or the console available.
+  Better: verify the <em>rule</em> first, and only run the live test if you really want the proof.</p>
+<pre># 1. back it up BEFORE anything else
+wevtutil epl Security C:\Windows\Temp\Security-backup.evtx
+# 2. confirm you can still get in another way
+# 3. only then, if you choose to proceed:
+#    Clear-EventLog -LogName Security</pre>
+</div>
+
+<p>When you do run it, the resulting event is <strong>1102</strong> &ldquo;The audit log was
+cleared&rdquo;, and it is generated <em>as part of</em> the clear:</p>
+<pre>data.win.system.eventID:1102
+rule.description:*log*cleared*
+rule.groups:log_cleared</pre>
+
+<p>This detection works even if the attacker clears everything else, because Wazuh is already
+streaming the event to the indexer on another machine. That architectural property &mdash;
+centralised, remote, tamper-resistant logging &mdash; is the strongest argument for a SIEM, and
+this test is the most convincing demonstration of it you can run.</p>
+
+<h2>P5.10 Test 9 &mdash; Service installation</h2>
+<pre># on WinServer - 7045 lives in the System channel, not Security
+sc.exe create LabTestService binPath= "C:\Windows\System32\cmd.exe /c whoami"
+sc.exe delete LabTestService</pre>
+<pre>rule.description:"New service installed"
+data.win.system.eventID:7045
+agent.name:"winsrv-01" AND location:"win_eventchannel"</pre>
+
+<h2>P5.11 The validation matrix</h2>
+<p>Fill this in completely. It is the single most useful page in your whole project.</p>
+
+<table class="d wrap">
+  <tr>
+    <th style="width:7%">#</th><th style="width:26%">Test</th><th style="width:13%">Event ID</th>
+    <th style="width:16%">Expected source</th><th style="width:12%">Detected?</th><th>Notes / rule needed</th>
+  </tr>
+  <tr><td class="c">1</td><td>Port scan</td><td class="mono">5156 / 5157</td><td>Security</td><td class="c"></td><td></td></tr>
+  <tr><td class="c">2</td><td>Share enumeration</td><td class="mono">5140 / 5145</td><td>Security</td><td class="c"></td><td></td></tr>
+  <tr><td class="c">3a</td><td>Failed logon</td><td class="mono">4625</td><td>Security</td><td class="c"></td><td></td></tr>
+  <tr><td class="c">3b</td><td>Account lockout</td><td class="mono">4740</td><td>Security</td><td class="c"></td><td></td></tr>
+  <tr><td class="c">4</td><td>Successful network logon</td><td class="mono">4624</td><td>Security</td><td class="c"></td><td></td></tr>
+  <tr><td class="c">4b</td><td>Explicit credentials</td><td class="mono">4648</td><td>Security</td><td class="c"></td><td></td></tr>
+  <tr><td class="c">5a</td><td>Added to Administrators</td><td class="mono">4732</td><td>Security</td><td class="c"></td><td></td></tr>
+  <tr><td class="c">5b</td><td>Special privileges</td><td class="mono">4672</td><td>Security</td><td class="c"></td><td></td></tr>
+  <tr><td class="c">6</td><td>Scheduled task created</td><td class="mono">4698</td><td>Security</td><td class="c"></td><td></td></tr>
+  <tr><td class="c">7</td><td>File change (FIM)</td><td class="mono">syscheck</td><td>syscheck</td><td class="c"></td><td></td></tr>
+  <tr><td class="c">8</td><td>Audit log cleared</td><td class="mono">1102</td><td>Security</td><td class="c"></td><td></td></tr>
+  <tr><td class="c">9</td><td>Service installed</td><td class="mono">7045</td><td>System</td><td class="c"></td><td></td></tr>
+  <tr><td class="c">10</td><td>User account created</td><td class="mono">4720</td><td>Security</td><td class="c"></td><td></td></tr>
+  <tr><td class="c">11</td><td>Audit policy changed</td><td class="mono">4719</td><td>Security</td><td class="c"></td><td></td></tr>
+  <tr><td class="c">12</td><td>Process created (cmdline)</td><td class="mono">4688</td><td>Security</td><td class="c"></td><td></td></tr>
+  <tr><td class="c">13</td><td>PowerShell script block</td><td class="mono">4104</td><td>PS Operational</td><td class="c"></td><td></td></tr>
+</table>
+
+<h2>P5.12 What to do with the gaps</h2>
+<p>Every blank cell in &ldquo;Detected?&rdquo; is a finding. For each one, decide:</p>
+<table class="d">
+  <tr><th style="width:36%">Reason for the gap</th><th>Fix</th></tr>
+  <tr><td>Audit policy not enabled</td><td>Part&nbsp;P4.4. Enable the subcategory.</td></tr>
+  <tr><td>Log channel not collected</td><td>Part&nbsp;P6. Add it to the agent config.</td></tr>
+  <tr><td>Event collected but no rule fires</td><td>Part&nbsp;P7. Write a local rule.</td></tr>
+  <tr><td>Event collected but rule too low</td><td>Part&nbsp;P7. Raise the level.</td></tr>
+  <tr><td>Deliberately not collected</td><td>Write down <em>why</em>. A documented decision is a finding too.</td></tr>
+</table>
+
+<!-- ==================== P6 ==================== -->
+<h1 class="sec">P6 &nbsp;Windows event coverage and Sysmon</h1>
+
+<p class="lead">Wazuh's Windows agent does not collect every log by default. This section closes the
+coverage gaps you found in Part&nbsp;P5.</p>
+
+<h2>P6.1 What is collected by default</h2>
+<table class="d">
+  <tr><th style="width:34%">Channel</th><th>Contains</th></tr>
+  <tr><td><code>Application</code></td><td>Application errors and warnings</td></tr>
+  <tr><td><code>Security</code></td><td><strong>The important one.</strong> Logons, privileges, audit events. Nearly empty until P4.4 is done.</td></tr>
+  <tr><td><code>System</code></td><td>Service start/stop, driver loads, service installations (7045)</td></tr>
+  <tr><td><code>Windows PowerShell</code></td><td>PowerShell engine events, if configured</td></tr>
+</table>
+
+<h2>P6.2 Adding channels</h2>
+<p>Edit <code>C:\Program Files (x86)\ossec-agent\ossec.conf</code>. The block you want is
+<code>localfile</code>, which maps a log channel to a decoder:</p>
+
+<pre>&lt;ossec_config&gt;
+  &lt;localfile&gt;
+    &lt;log_format&gt;eventchannel&lt;/log_format&gt;
+    &lt;location&gt;Microsoft-Windows-PowerShell/Operational&lt;/location&gt;
+  &lt;/localfile&gt;
+
+  &lt;localfile&gt;
+    &lt;log_format&gt;eventchannel&lt;/log_format&gt;
+    &lt;location&gt;Microsoft-Windows-TaskScheduler/Operational&lt;/location&gt;
+  &lt;/localfile&gt;
+
+  &lt;localfile&gt;
+    &lt;log_format&gt;eventchannel&lt;/log_format&gt;
+    &lt;location&gt;Microsoft-Windows-Windows Firewall With Advanced Security/Firewall&lt;/location&gt;
+  &lt;/localfile&gt;
+
+  &lt;localfile&gt;
+    &lt;log_format&gt;eventchannel&lt;/log_format&gt;
+    &lt;location&gt;Microsoft-Windows-Sysmon/Operational&lt;/location&gt;
+  &lt;/localfile&gt;
+&lt;/ossec_config&gt;</pre>
+
+<pre>Restart-Service Wazuh
+Get-Content "C:\Program Files (x86)\ossec-agent\wazuh-agent.log" -Tail 20</pre>
+
+<p>Verify the channel exists before adding it &mdash; a typo is silently ignored:</p>
+<pre>Get-WinEvent -ListLog * | Where-Object { $_.LogName -like "*PowerShell*" } |
+  Select-Object LogName, IsEnabled
+wevtutil gli "Microsoft-Windows-Sysmon/Operational"</pre>
+
+<div class="box b-warn">
+  <span class="bt">log_format matters more than you would think</span>
+  <p><code>eventchannel</code> is for modern Windows Event Log channels and produces structured,
+  decoded JSON. <code>full</code> is for text log files. Using <code>full</code> against an event
+  channel gives you unparseable junk; using <code>eventchannel</code> against a text file does
+  nothing at all. Most &ldquo;my Windows agent sees nothing&rdquo; problems are exactly this.</p>
+</div>
+
+<h2>P6.3 Sysmon &mdash; the single best telemetry upgrade</h2>
+<p>Sysmon is part of Sysinternals (Microsoft). It writes one consolidated, high-quality log of
+process creation, network connections, file creation and registry changes &mdash; precisely the
+things that matter for detection. <strong>Wazuh decodes Sysmon natively</strong>, so no custom
+decoder is needed.</p>
+
+<h3>Install</h3>
+<pre># download Sysmon from the official Sysinternals site, then:
+Expand-Archive -Path .\Sysmon.zip -DestinationPath C:\Sysmon
+cd C:\Sysmon
+.\Sysmon64.exe -i          <span class="cmt"># install with default config</span>
+.\Sysmon64.exe -c          <span class="cmt"># check the active config</span></pre>
+
+<h3>Configure</h3>
+<p>The default config is reasonable, but a tuned config is much better. Download the vetted
+configuration published with Sysinternals and apply it:</p>
+<pre>.\Sysmon64.exe -c .\SysmonConfig.xml
+Restart-Service Wazuh</pre>
+
+<p>Sysmon config is XML with two kinds of rule &mdash; <em>include</em> (capture these) and
+<em>exclude</em> (ignore these, to control volume). Anything neither included nor excluded is
+<strong>not</strong> captured. A minimal config covering the detection-relevant events:</p>
+
+<pre>&lt;Sysmon schemaversion="4.90"&gt;
+  &lt;EventFiltering&gt;
+    &lt;!-- Event ID 1: process creation, with full command line --&gt;
+    &lt;ProcessCreate onmatch="include"&gt;
+      &lt;CommandLine condition="is any"/&gt;
+      &lt;OriginalFileName condition="is any"/&gt;
+    &lt;/ProcessCreate&gt;
+
+    &lt;!-- Event ID 3: outbound network connections --&gt;
+    &lt;NetworkConnect onmatch="include"&gt;
+      &lt;DestinationPort condition="is any"/&gt;
+    &lt;/NetworkConnect&gt;
+
+    &lt;!-- Event ID 11: file creation --&gt;
+    &lt;FileCreate onmatch="include"&gt;
+      &lt;TargetFilename condition="is any"/&gt;
+    &lt;/FileCreate&gt;
+
+    &lt;!-- Events 12/13/14: registry create / set / rename --&gt;
+    &lt;RegistryEvent onmatch="include"&gt;
+      &lt;TargetObject condition="contains"&gt;CurrentVersion\Run&lt;/TargetObject&gt;
+      &lt;TargetObject condition="contains"&gt;CurrentVersion\RunOnce&lt;/TargetObject&gt;
+      &lt;TargetObject condition="contains"&gt;Services\&lt;/TargetObject&gt;
+      &lt;TargetObject condition="contains"&gt;Windows Defender&lt;/TargetObject&gt;
+    &lt;/RegistryEvent&gt;
+
+    &lt;!-- Event ID 22: DNS queries --&gt;
+    &lt;DnsQuery onmatch="exclude"&gt;
+      &lt;QueryName condition="is any"&gt;localhost&lt;/QueryName&gt;
+    &lt;/DnsQuery&gt;
+  &lt;/EventFiltering&gt;
+&lt;/Sysmon&gt;</pre>
+
+<div class="box b-warn">
+  <span class="bt">Sysmon is very easy to flood with volume</span>
+  <p>Event IDs 1 and 11 produce enormous numbers of records on any active machine. Start with
+  narrow <em>include</em> conditions, watch the volume for an hour, and widen only if you need to.
+  Remember Sysmon events arrive in Wazuh as <code>location:win_eventchannel</code>, so if your
+  alert count explodes after enabling it, that is why &mdash; and it is a good problem to have,
+  because it means you have process-level visibility.</p>
+</div>
+
+<h3>Verify Sysmon is reporting</h3>
+<pre># on WinServer
+Get-WinEvent -LogName "Microsoft-Windows-Sysmon/Operational" -MaxEvents 5 |
+  Format-List Id, TimeCreated, Message</pre>
+<pre># then in Wazuh
+data.win.system.eventID:1 AND agent.name:"winsrv-01"
+data.win.system.eventID:3 AND agent.name:"winsrv-01"
+location:win_eventchannel AND rule.level:&gt;=9</pre>
+
+<h2>P6.4 A better way to work than raw event IDs</h2>
+<p>Raw IDs are fine for testing, but for dashboards you want Wazuh's own rule <em>groups</em>, because
+they are stable across Wazuh versions and translate into plain English:</p>
+<table class="d">
+  <tr><th style="width:42%">Group</th><th>Covers</th></tr>
+  <tr><td class="mono">authentication_failed</td><td>Failed logons</td></tr>
+  <tr><td class="mono">authentication_success</td><td>Successful logons</td></tr>
+  <tr><td class="mono">account_changed</td><td>Account and group modifications</td></tr>
+  <tr><td class="mono">win_authentication</td><td>Broad authentication family</td></tr>
+  <tr><td class="mono">log_cleared</td><td>Log tampering</td></tr>
+  <tr><td class="mono">windows_privilege_change</td><td>Your 4732 rule from P7.2</td></tr>
+  <tr><td class="mono">windows_persistence</td><td>Your task/service rules</td></tr>
+  <tr><td class="mono">windows_correlation</td><td>Your correlation rule</td></tr>
+</table>
+
+<!-- ==================== P7 ==================== -->
+<h1 class="sec">P7 &nbsp;Detection rules for Windows</h1>
+
+<p class="lead">Part&nbsp;P5 told you what the gaps are. This part closes them. The mechanics are
+in Volume&nbsp;1 Part&nbsp;13; here is what to write for Windows specifically.</p>
+
+<h2>P7.1 Find the field names first</h2>
+<p>Never guess a field name. Paste a real Windows event into the tester:</p>
+
+<pre># on SIEM-Ubuntu
+sudo /var/ossec/bin/wazuh-logtest</pre>
+<p>Better still, have the agent print its own decoded fields directly against the real Windows
+machine:</p>
+
+<pre># on WinServer
+& "C:\Program Files (x86)\ossec-agent\wazuh-agent.exe" -t
+# paste a Security log line, press Enter
+# it prints the rule that matched AND the decoded fields</pre>
+
+<div class="box b-info">
+  <span class="bt">The field names you will use constantly on Windows</span>
+  <p><code>data.win.system.eventID</code> &mdash; the numeric event ID. And
+  <code>data.win.eventdata.*</code> &mdash; the individual event fields, where the real detail
+  lives (TargetUserName, SubjectUserName, IpAddress, LogonType). Spell them exactly as the tester
+  prints them. Some Wazuh versions deliver the audit field as
+  <code>data.win_system:eventID</code>, so trust the tester output over any documentation you
+  read.</p>
+</div>
+
+<h2>P7.2 The rules worth writing</h2>
+<p>Save into <code>/var/ossec/etc/local_rules.xml</code> on SIEM-Ubuntu. Validate and deploy:</p>
+<pre>sudo /var/ossec/bin/wazuh-logtest -t
+sudo systemctl restart wazuh-manager
+sudo /var/ossec/bin/agent_control -R 002   <span class="cmt"># refresh agent config</span></pre>
+
+<pre>&lt;group name="windows,lab_detection,"&gt;
+
+  &lt;!-- 4732: member added to a privileged group --&gt;
+  &lt;rule id="100300" level="12"&gt;
+    &lt;if_sid&gt;4732&lt;/if_sid&gt;
+    &lt;description&gt;Member $(MemberName) added to group $(TargetUserName) on $(SystemName)&lt;/description&gt;
+    &lt;mitre&gt;&lt;id&gt;T1098&lt;/id&gt;&lt;/mitre&gt;
+    &lt;group&gt;windows_privilege_change,critical_change,&lt;/group&gt;
+  &lt;/rule&gt;
+
+  &lt;!-- 1102: audit log cleared. Serious, and rarely benign. --&gt;
+  &lt;rule id="100301" level="14"&gt;
+    &lt;if_sid&gt;1102&lt;/if_sid&gt;
+    &lt;description&gt;Audit log cleared on $(SystemName) by $(SubjectUserName)&lt;/description&gt;
+    &lt;mitre&gt;&lt;id&gt;T1070&lt;/id&gt;&lt;/mitre&gt;
+    &lt;group&gt;windows_log_tampering,anti_forensics,&lt;/group&gt;
+  &lt;/rule&gt;
+
+  &lt;!-- 4720: new user account created --&gt;
+  &lt;rule id="100302" level="11"&gt;
+    &lt;if_sid&gt;4720&lt;/if_sid&gt;
+    &lt;description&gt;User account $(TargetUserName) created by $(SubjectUserName)&lt;/description&gt;
+    &lt;mitre&gt;&lt;id&gt;T1136&lt;/id&gt;&lt;/mitre&gt;
+    &lt;group&gt;windows_account_change,&lt;/group&gt;
+  &lt;/rule&gt;
+
+  &lt;!-- 4698: scheduled task created --&gt;
+  &lt;rule id="100303" level="10"&gt;
+    &lt;if_sid&gt;4698&lt;/if_sid&gt;
+    &lt;description&gt;Scheduled task $(TaskName) created by $(SubjectUserName)&lt;/description&gt;
+    &lt;mitre&gt;&lt;id&gt;T1053.005&lt;/id&gt;&lt;/mitre&gt;
+    &lt;group&gt;windows_persistence,&lt;/group&gt;
+  &lt;/rule&gt;
+
+  &lt;!-- 7045: service installed --&gt;
+  &lt;rule id="100304" level="11"&gt;
+    &lt;if_sid&gt;7045&lt;/if_sid&gt;
+    &lt;description&gt;Service $(ServiceName) installed on $(SystemName)&lt;/description&gt;
+    &lt;mitre&gt;&lt;id&gt;T1543.003&lt;/id&gt;&lt;/mitre&gt;
+    &lt;group&gt;windows_persistence,&lt;/group&gt;
+  &lt;/rule&gt;
+
+  &lt;!-- 4719: audit policy changed. Someone is disabling your visibility. --&gt;
+  &lt;rule id="100305" level="12"&gt;
+    &lt;if_sid&gt;4719&lt;/if_sid&gt;
+    &lt;description&gt;Audit policy modified on $(SystemName) by $(SubjectUserName)&lt;/description&gt;
+    &lt;mitre&gt;&lt;id&gt;T1562.002&lt;/id&gt;&lt;/mitre&gt;
+    &lt;group&gt;windows_defense_evasion,&lt;/group&gt;
+  &lt;/rule&gt;
+
+  &lt;!-- 4740: account lockout. Signal, not noise. --&gt;
+  &lt;rule id="100306" level="8"&gt;
+    &lt;if_sid&gt;4740&lt;/if_sid&gt;
+    &lt;description&gt;Account $(TargetUserName) locked out on $(SystemName)&lt;/description&gt;
+    &lt;group&gt;windows_authentication,lockout,&lt;/group&gt;
+  &lt;/rule&gt;
+
+  &lt;!-- Correlation: a lockout followed by SUCCESS from the same source.
+       This is the rule that separates a typo from a real intrusion. --&gt;
+  &lt;rule id="100307" level="13"&gt;
+    &lt;if_mit sid="100306"&gt;0,6,&lt;/if_mit&gt;
+    &lt;same_source_ip /&gt;
+    &lt;description&gt;$(TargetUserName) logged on after a lockout - possible credential compromise&lt;/description&gt;
+    &lt;mitre&gt;&lt;id&gt;T1110&lt;/id&gt;&lt;/mitre&gt;
+    &lt;group&gt;windows_correlation,credential_attack,&lt;/group&gt;
+  &lt;/rule&gt;
+
+&lt;/group&gt;</pre>
+
+<div class="box b-ok">
+  <span class="bt">Why rule 100307 is the best rule in this document</span>
+  <p>Every individual event it depends on is low-severity and mostly benign. Someone mistyping a
+  password five times is not an incident. But <em>lockout followed by success from the same
+  source</em> means the guessing eventually worked &mdash; and no amount of watching the individual
+  events would have shown you that. This is what correlation means, and it is the difference between
+  a SIEM that shows alerts and one that shows incidents.</p>
+</div>
+
+<h2>P7.3 Test each rule before you trust it</h2>
+<div class="step"><span class="sn">1</span><span class="st">Validate the XML</span>
+<pre>sudo /var/ossec/bin/wazuh-logtest -t</pre></div>
+<div class="step"><span class="sn">2</span><span class="st">Test against a real event line</span>
+<pre>sudo /var/ossec/bin/wazuh-logtest
+# paste the actual Windows log line that should trigger it</pre></div>
+<div class="step"><span class="sn">3</span><span class="st">Restart, then refresh the agent config</span>
+<pre>sudo systemctl restart wazuh-manager
+sudo /var/ossec/bin/agent_control -R 002</pre></div>
+<div class="step"><span class="sn">4</span><span class="st">Trigger it for real, from Part&nbsp;P5</span>
+<pre># e.g. re-run the 4732 test from P5.6</pre></div>
+<div class="step"><span class="sn">5</span><span class="st">Confirm in the dashboard</span>
+<pre>rule.id:100300
+agent.name:"winsrv-01" AND rule.level:&gt;=10</pre>
+<p>If it does not appear, check the agent received the config (<code>agent_control -R</code>) before
+looking anywhere else.</p>
+</div>
+
+<h2>P7.4 Saved searches worth having</h2>
+<pre>rule.groups:windows_privilege_change
+rule.groups:anti_forensics
+rule.groups:windows_correlation
+rule.groups:windows_persistence
+data.win.system.eventID:1102
+data.win.system.eventID:4719
+rule.level:&gt;=10 AND agent.name:"winsrv-01"
+location:win_eventchannel AND rule.level:&gt;=9
+data.win.system.eventID:1 AND data.win.eventdata.CommandLine:*powershell*</pre>
+<p>Name them and bookmark them, and they become your daily workflow &mdash; the same habit from
+Volume&nbsp;1 Part&nbsp;6.2, applied to Windows.</p>
+
+<h2>P7.5 A dashboard for the Windows host</h2>
+<p><strong>Dev Tools</strong> &rarr; <strong>Custom Dashboards</strong>. Build one panel per
+detection category, filtered to <code>agent.name:"winsrv-01"</code>, sorted by level descending.
+You now have a single screen answering &ldquo;is anything wrong with our server?&rdquo; &mdash;
+which is the entire deliverable a SIEM exists to provide.</p>
+
+<!-- ==================== P8 ==================== -->
+<h1 class="sec">P8 &nbsp;The writeup template</h1>
+
+<p class="lead">Stop at this point and the last day was an afternoon of clicking. Do this part and
+it becomes a portfolio piece. Structure, with the real content filled in:</p>
+
+<pre>## Windows Server 2022 Hardening &amp; Detection Validation
+
+**Scope:** WinServer (10.0.0.50), VirtualBox isolated lab network, 30 Sep 2026.
+Authorised by: self (sole owner of the lab hardware and software).
+
+### 1. Objective
+Reduce the attack surface of a default Windows Server 2022 install and prove the
+SIEM detects the relevant activity classes.
+
+### 2. Initial state
+- Open ports: [from nmap]
+- SMBv1: [enabled/disabled]
+- SMB signing: [state]
+- Minimum password length: [n]
+- Account lockout: [state]
+- Guest account: [state]
+- SCA pass rate: [n]% ([x] of [y] checks)
+- Wazuh alerts from this host: [n]
+
+### 3. Findings
+| # | Finding | Risk | Control applied | Evidence |
+|---|---------|------|-----------------|----------|
+| 1 | SMBv1 enabled | High | Disabled feature | nmap after-output |
+| 2 | No lockout policy | Medium | 5 tries / 15 min | net accounts |
+| 3 | Group membership not audited | High | Audit subcategory enabled | event 4732 alert |
+
+Explain WHY each finding matters, in one sentence. This is the part that shows judgement.
+
+### 4. Changes applied
+[the commands, grouped by category, with a short rationale each]
+
+### 5. Post-change state
+[the before/after table from P4.9]
+
+### 6. Detection validation
+[the matrix from P5.11, completed]
+
+For each row where detection was achieved, include:
+- what you did
+- the Windows event ID generated
+- the Wazuh rule that fired
+- a screenshot of the alert
+
+### 7. Gaps and limitations
+Be honest and specific. This is the most impressive section:
+- "5145 events are generated but no rule correlates them - rule needed"
+- "Process creation auditing disabled due to volume; Sysmon used instead"
+- "No network-level detection - this lab has no NDR"
+
+### 8. What I would do next
+[see Part P9]</pre>
+
+<div class="box b-ok">
+  <span class="bt">Section 7 is why you will get the interview</span>
+  <p>Most people who show a hardening project show only the wins. Documenting what you found
+  broken, what you chose not to fix, and why &mdash; demonstrates exactly the professional judgement
+  an employer is screening for. It also shows you can think past the task.</p>
+</div>
+
+<!-- ==================== P9 ==================== -->
+<h1 class="sec">P9 &nbsp;Project roadmap &mdash; what to build next</h1>
+
+<p class="lead">You asked what to do after this. Here is a ranked list, best value first, sized
+for a beginner working evenings.</p>
+
+<table class="d wrap">
+  <tr><th style="width:7%">#</th><th style="width:28%">Project</th><th>Why, and what it teaches</th></tr>
+  <tr>
+    <td class="c">1</td>
+    <td><strong>Promote WinServer to a domain controller</strong></td>
+    <td>Install AD DS, create users and OUs, apply Group Policy centrally. This is the single
+        biggest jump in realism and it is where most real Windows security happens. You will learn
+        Kerberos, group policy, logon types, SYSVOL and replication. Everything else on this list
+        is easier once you have done this.</td>
+  </tr>
+  <tr>
+    <td class="c">2</td>
+    <td><strong>Suricata on SIEM-Ubuntu</strong></td>
+    <td>Wazuh sees what hosts <em>report</em>. Suricata sees what actually crosses the wire &mdash;
+        including things no host reports. Install it, write a few rules, ship <code>eve.json</code>
+        into Wazuh with a Filebeat input. You go from host-based to network detection, which is a
+        major capability gap in most junior CVs.</td>
+  </tr>
+  <tr>
+    <td class="c">3</td>
+    <td><strong>Enroll WindowsClient, add a third VM</strong></td>
+    <td>Two or three agents makes agent groups, labels and multi-agent searches genuinely
+        necessary instead of theoretical. Cheap to do, and it immediately makes your dashboards
+        useful.</td>
+  </tr>
+  <tr>
+    <td class="c">4</td>
+    <td><strong>Sigma rules</strong></td>
+    <td>A portable detection format. Write one for your 4732 rule, run it in Wazuh, and you have a
+        skill that transfers between every SIEM vendor. Strong portfolio signal for modest effort.</td>
+  </tr>
+  <tr>
+    <td class="c">5</td>
+    <td><strong>Network segmentation with a firewall VM</strong></td>
+    <td>Put pfSense or OPNsense between segments, then show Wazuh alerts changing when you move a
+        machine across. Teaches segmentation as a control and gives you packet-level visibility.</td>
+  </tr>
+  <tr>
+    <td class="c">6</td>
+    <td><strong>osquery</strong></td>
+    <td>SQL-query your endpoints. Pairs well with Wazuh as an independent second opinion on
+        process state.</td>
+  </tr>
+  <tr>
+    <td class="c">7</td>
+    <td><strong>Configuration as code</strong></td>
+    <td>Move agent configuration and the hardening script out of the manager into Ansible. Teaches
+        infrastructure as code &mdash; directly transferable professional skill, and you already know
+        Linux well enough.</td>
+  </tr>
+  <tr>
+    <td class="c">8</td>
+    <td><strong>Theory to pair with the lab</strong></td>
+    <td>TryHackMe rooms on AD, Windows defence and blue team, plus PortSwigger for understanding the
+        techniques you are detecting. Your lab gives you somewhere to practise; these give you the
+        vocabulary an interviewer will use.</td>
+  </tr>
+  <tr>
+    <td class="c">9</td>
+    <td><strong>Publish it</strong></td>
+    <td>A GitHub repo with your <code>local_rules.xml</code>, your FIM config, <code>harden-server.ps1</code>,
+        your SCA before/after, and the Part&nbsp;P8 writeup. Then a short post about it.
+        <strong>This is the highest-return hour you will spend.</strong></td>
+  </tr>
+</table>
+
+<h2>P9.1 Turn this lab into a script</h2>
+<p>The hardening in Part&nbsp;P4 is a perfect candidate for automation. Package it as
+<code>harden-server.ps1</code> that runs on any fresh Windows Server VM, and you have demonstrated
+repeatability &mdash; which is what an employer actually means by &ldquo;automation&rdquo;.</p>
+
+<pre># harden-server.ps1 - run as Administrator
+param([string]$LabIP = "10.0.0.50")
+
+Write-Host "=== Password and account policy ==="
+net accounts /minpwlen:14 /minpwage:1 /maxpwage:60 /lengthenable:yes | Out-Null
+net accounts /lockoutthreshold:5 /lockoutduration:15 /lockoutobservation:30 | Out-Null
+net user guest /active:no | Out-Null
+
+Write-Host "=== SMB hardening ==="
+if (Get-WindowsOptionalFeature -Online -FeatureName SMB1Protocol) {
+  Disable-WindowsOptionalFeature -Online -FeatureName SMB1Protocol -NoRestart | Out-Null
+}
+Set-SmbServerConfiguration -RequireSecuritySignature $true -EnableSecuritySignature $true -Force
+Set-SmbServerConfiguration -EncryptData $true -Force
+Set-SmbServerConfiguration -EnableAuthNullUser $false -Force
+
+Write-Host "=== Null session restriction ==="
+$lsa = "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa"
+Set-ItemProperty $lsa -Name RestrictAnonymous         -Value 1
+Set-ItemProperty $lsa -Name RestrictAnonymousSAM      -Value 1
+Set-ItemProperty $lsa -Name restrictnullsessions      -Value 1
+Set-ItemProperty $lsa -Name EveryoneIncludesAnonymous -Value 0
+
+Write-Host "=== LSA protection and Credential Guard ==="
+Set-ItemProperty $lsa -Name RunAsPPL -Value 1
+Enable-WindowsOptionalFeature -Online -FeatureName CredentialGuard -All | Out-Null
+
+Write-Host "=== Audit policy ==="
+auditpol /backup /file:"C:\Windows\Temp\audit-backup.csv"
+auditpol /set /subcategory:"Logon" /success:enable /failure:enable | Out-Null
+auditpol /set /subcategory:"Special Logon" /success:enable | Out-Null
+auditpol /set /subcategory:"Logon (Service Package)" /success:enable | Out-Null
+auditpol /set /subcategory:"Credential Validation" /success:enable /failure:enable | Out-Null
+auditpol /set /subcategory:"Account Lockout" /failure:enable | Out-Null
+auditpol /set /subcategory:"Security Group Management" /success:enable | Out-Null
+auditpol /set /subcategory:"User Account Management" /success:enable | Out-Null
+auditpol /set /subcategory:"Audit Policy Change" /success:enable | Out-Null
+auditpol /set /subcategory:"Detailed File Share" /success:enable | Out-Null
+Set-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" `
+  -Name AuditProcessCreationIncludeCmdLine_Enabled -Value 1
+
+Write-Host "=== PowerShell logging ==="
+$ps = "HKLM:\Software\Policies\Microsoft\Windows\PowerShell"
+New-Item "$ps\ScriptBlockLogging" -Force | Out-Null
+Set-ItemProperty "$ps\ScriptBlockLogging" -Name EnableScriptBlockLogging -Value 1
+
+Write-Host "=== Firewall ==="
+Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled True `
+  -DefaultInboundAction Block -DefaultOutboundAction Allow
+New-NetFirewallRule -DisplayName "Wazuh Agent 1514" -Direction Inbound `
+  -Action Allow -Protocol TCP -LocalPort 1514 -Profile Any -ErrorAction SilentlyContinue | Out-Null
+
+Write-Host "=== Networking ==="
+Set-NetIPInterface -InterfaceAlias "Ethernet" -Dhcp Disabled -ErrorAction SilentlyContinue
+if (-not (Get-NetIPAddress -InterfaceAlias "Ethernet" -AddressFamily IPv4 `
+           -ErrorAction SilentlyContinue | Where-Object IPAddress -eq $LabIP)) {
+  New-NetIPAddress -InterfaceAlias "Ethernet" -IPAddress $LabIP -PrefixLength 24
+}
+
+Write-Host ""
+Write-Host "=== Verification - compare against your baseline ===" -ForegroundColor Cyan
+Get-SmbServerConfiguration | Format-List EnableSMB1Protocol, RequireSecuritySignature, EncryptData
+auditpol /get /subcategory:"Logon"
+Get-NetFirewallProfile | Format-Table Name, Enabled, DefaultInboundAction -AutoSize
+Write-Host "Reboot required for Credential Guard and LSA protection to fully apply."</pre>
+
+<div class="box b-ok">
+  <span class="bt">Run it against a snapshot, not against your working server</span>
+  <p>This is exactly the kind of thing to test on a throwaway VM. That is what snapshots are for.
+  And notice the script ends by printing its own verification &mdash; automation that checks its own
+  work is the difference between a script and a tool.</p>
+</div>
+
+<h2>P9.2 Where you actually are now</h2>
+<p>Two documents ago you had a multi-layer network fault and a partly installed SIEM. You now have a
+three-node Wazuh stack with TLS, a live agent fleet, a hardened Windows Server, an audit policy
+tuned for detection, custom correlation rules, and a validation matrix you filled in yourself.</p>
+<p>That last item is the one to be proudest of. Anyone can install a product. Knowing exactly which
+of your detections fire, which do not, and why &mdash; that is the professional skill, and it is
+the thing you will be able to talk about in an interview for an hour without running out of
+material.</p>
+
+<div class="box b-info" style="margin-top:6mm">
+  <span class="bt">Document conventions</span>
+  <p>Every IP, port, MAC and build number in this guide was verified against your actual VMs on
+  30&nbsp;September&nbsp;2026. Values marked <em>planned</em>, <em>optional</em> or
+  <em>replace with your adapter name</em> are the ones you may need to adjust. Several Wazuh field
+  names differ slightly between versions, which is why P7.1 makes you confirm them with
+  <code>wazuh-logtest</code> rather than trusting any document &mdash; including this one.</p>
+</div>
+
+<!-- ==================== APPENDIX A ==================== -->
+<h1 class="sec">Appendix A &nbsp;Windows security event ID reference</h1>
+
+<p class="lead">Learn these twenty and you can read a Windows server. Print this page.</p>
+
+<h2>A.1 Authentication (Security log)</h2>
+<table class="d">
+  <tr><th style="width:14%">ID</th><th style="width:44%">Event</th><th>Why it matters</th></tr>
+  <tr><td class="mono">4616</td><td>System time changed</td><td>Timestamp manipulation &mdash; breaks every log correlation afterwards</td></tr>
+  <tr><td class="mono">4624</td><td>Successful logon</td><td>The foundation event. Read <code>LogonType</code> to know how.</td></tr>
+  <tr><td class="mono">4625</td><td>Failed logon</td><td>Authentication attempts that failed</td></tr>
+  <tr><td class="mono">4634 / 4635</td><td>Logoff / logon session terminated</td><td>Session lifecycle</td></tr>
+  <tr><td class="mono">4647</td><td>User initiated logoff</td><td>Clean shutdown initiated by the user</td></tr>
+  <tr><td class="mono">4648</td><td>Logon with explicit credentials</td><td>How <code>runas</code> works; a way to hide the real account</td></tr>
+  <tr><td class="mono">4672</td><td>Special privileges assigned to new logon</td><td>A new session holding admin rights</td></tr>
+  <tr><td class="mono">4776</td><td>Credential validation (NTLM)</td><td>NTLM authentication attempts</td></tr>
+  <tr><td class="mono">4740</td><td>Account locked out</td><td>Something tried repeatedly and failed</td></tr>
+</table>
+
+<h2>A.2 Account and group management (Security log)</h2>
+<table class="d">
+  <tr><th style="width:14%">ID</th><th style="width:44%">Event</th><th>Why it matters</th></tr>
+  <tr><td class="mono">4720</td><td>User account created</td><td>Persistence: a new account</td></tr>
+  <tr><td class="mono">4722</td><td>User account enabled</td><td>A disabled account turned back on</td></tr>
+  <tr><td class="mono">4724</td><td>Attempt to reset a password</td><td>Possible account takeover</td></tr>
+  <tr><td class="mono">4725</td><td>Attempt to delete a user account</td><td>Cleanup after use</td></tr>
+  <tr><td class="mono">4726</td><td>User account deleted</td><td>Cleanup</td></tr>
+  <tr><td class="mono">4728</td><td>Member added to a global security group</td><td>Privilege change</td></tr>
+  <tr><td class="mono">4729 / 4731</td><td>Member added to a local / universal group</td><td>Privilege change</td></tr>
+  <tr><td class="mono">4732</td><td><strong>Member added to a privileged group</strong></td><td><strong>The escalation event. Alert on this.</strong></td></tr>
+  <tr><td class="mono">4738 / 4742</td><td>Account renamed / changed</td><td>Possible evasion of name-based rules</td></tr>
+  <tr><td class="mono">4756</td><td>Member added to a universal security group</td><td>Privilege change (domain)</td></tr>
+</table>
+
+<h2>A.3 Object access, processes and persistence</h2>
+<table class="d">
+  <tr><th style="width:14%">ID</th><th style="width:44%">Event</th><th>Why it matters</th></tr>
+  <tr><td class="mono">4688</td><td>Process created</td><td>Everything that runs. Highest volume &mdash; needs cmdline enabled to be useful</td></tr>
+  <tr><td class="mono">4697</td><td>Service installed (Security log)</td><td>Persistence via a service</td></tr>
+  <tr><td class="mono">4698 / 4699</td><td>Scheduled task created / deleted</td><td>The most common persistence mechanism</td></tr>
+  <tr><td class="mono">4719</td><td>Audit policy modified</td><td>Someone is disabling your monitoring</td></tr>
+  <tr><td class="mono">5140</td><td>Share accessed</td><td>Data access</td></tr>
+  <tr><td class="mono">5145</td><td>Detailed object access</td><td>Precise file access. Noisy but valuable.</td></tr>
+  <tr><td class="mono">7045</td><td>Service installed (<strong>System log</strong>)</td><td>Persistence. Note: different log from 4697.</td></tr>
+</table>
+
+<h2>A.4 Defence evasion and PowerShell</h2>
+<table class="d">
+  <tr><th style="width:14%">ID</th><th style="width:44%">Event</th><th>Why it matters</th></tr>
+  <tr><td class="mono">1102</td><td>Audit log cleared (<strong>Security log</strong>)</td><td>Covering tracks. Alert at high severity, always.</td></tr>
+  <tr><td class="mono">4103</td><td>PowerShell module logging</td><td>Module use recorded</td></tr>
+  <tr><td class="mono">4104</td><td><strong>PowerShell script block</strong></td><td><strong>The script itself, even when obfuscated. Very high value.</strong></td></tr>
+  <tr><td class="mono">5156</td><td>Firewall allowed a connection</td><td>Requires <em>Audit Filtering Platform Connection</em> &mdash; very high volume</td></tr>
+  <tr><td class="mono">5157</td><td>Firewall blocked a connection</td><td>Same caveat; useful for tuning</td></tr>
+</table>
+
+<h2>A.5 Sysmon event IDs (Microsoft-Windows-Sysmon/Operational)</h2>
+<table class="d">
+  <tr><th style="width:14%">ID</th><th style="width:44%">Event</th><th>Why it matters</th></tr>
+  <tr><td class="mono">1</td><td>Process creation</td><td>Like 4688 but leaner and always with the full command line</td></tr>
+  <tr><td class="mono">3</td><td>Network connection</td><td>Outbound connections, including to unusual ports</td></tr>
+  <tr><td class="mono">7</td><td>Image loaded</td><td>DLL injection and sideloading detection</td></tr>
+  <tr><td class="mono">8</td><td>CreateRemoteThread</td><td>Classic code injection technique</td></tr>
+  <tr><td class="mono">10</td><td>Process accessed</td><td>Credential access patterns</td></tr>
+  <tr><td class="mono">11</td><td>File created</td><td>Dropping files</td></tr>
+  <tr><td class="mono">12 / 13 / 14</td><td>Registry created / value set / renamed</td><td>Run keys, service changes, Defender tampering</td></tr>
+  <tr><td class="mono">22</td><td>DNS query</td><td>Command-and-control beaconing</td></tr>
+</table>
+
+<!-- ==================== APPENDIX B ==================== -->
+<h1 class="sec">Appendix B &nbsp;Command cheat sheet</h1>
+
+<h2>B.1 On Kali (audit and observation)</h2>
+<pre>ip -br a; ip neigh                            <span class="cmt"># who am I, who is next to me</span>
+ping -c3 10.0.0.50
+sudo nmap -Pn -sV -sC -p- --open 10.0.0.50
+sudo nmap -Pn -p 445 --script smb-protocols,smb2-security-mode,smb-enum-shares 10.0.0.50
+smbclient -L //10.0.0.50 -N
+smbmap -H 10.0.0.50
+netexec smb 10.0.0.50 --pass-pol
+ssh labadmin@10.0.0.50</pre>
+
+<h2>B.2 On WinServer (PowerShell, Administrator)</h2>
+<pre>net accounts                                 <span class="cmt"># password + lockout policy</span>
+net user &lt;name&gt; /active:no
+Get-LocalUser | Format-Table Name, Enabled -AutoSize
+Get-LocalGroupMember -Group "Administrators"
+Get-SmbServerConfiguration | Format-List *
+Set-SmbServerConfiguration -RequireSecuritySignature $true -Force
+Get-NetFirewallProfile | Format-Table Name, Enabled, DefaultInboundAction -AutoSize
+Get-NetFirewallRule -DisplayName "Wazuh*"
+auditpol /backup /file:C:\Windows\Temp\audit-backup.csv
+auditpol /restore /file:C:\Windows\Temp\audit-backup.csv
+auditpol /get /subcategory:"Logon"
+Get-MpComputerStatus | Format-List *
+Get-Service Wazuh | Format-Table Name, Status, StartType -AutoSize
+Test-NetConnection -ComputerName 10.0.0.40 -Port 1514
+wevtutil qe Security /c:10 /rd:true /f:text
+Get-WinEvent -LogName "Microsoft-Windows-Sysmon/Operational" -MaxEvents 10</pre>
+
+<h2>B.3 On SIEM-Ubuntu (Wazuh manager)</h2>
+<pre>sudo systemctl status wazuh-manager wazuh-indexer wazuh-dashboard filebeat
+sudo /var/ossec/bin/agent_control -l
+sudo /var/ossec/bin/agent_control -R 002
+sudo /var/ossec/bin/wazuh-logtest -t
+sudo /var/ossec/bin/wazuh-logtest
+sudo tail -f /var/ossec/logs/alerts/alerts.json | python3 -m json.tool
+curl -k -u <span class="prm">admin:&lt;MANAGER_PASSWORD&gt;</span> \
+  <span class="prm">https://127.0.0.1:9200/_cluster/health?pretty</span></pre>
+
+<h2>B.4 On Windows host (VirtualBox)</h2>
+<pre>VBoxManage showvminfo "WinServer" | Select-String <span class="prm">"NIC|Rule|DVD"</span>
+VBoxManage modifyvm "WinServer" --medium none
+VBoxManage controlvm "WinServer" snapshot take "winserver-audited-30sep"
+VBoxManage guestcontrol "WinServer" run --username .\labadmin --password &lt;pw&gt; `
+  --exe "C:\Windows\System32\cmd.exe" -- /c "whoami"
+ssh -p <span class="prm">2222</span> ubuntu@127.0.0.1          <span class="cmt"># SIEM-Ubuntu</span></pre>
+
+<h2>B.5 The three questions, every time</h2>
+<div class="box b-info">
+  <p><strong>Which machine?</strong> Agent name and IP.
+  <strong>What exactly happened?</strong> Rule description and level.
+  <strong>How do I prove it?</strong> The raw event fields.</p>
+  <p style="margin-top:2mm">If you cannot answer all three from the alert alone, you do not
+  understand the alert yet &mdash; and neither will anyone reviewing your work.</p>
+</div>
+
+</body>
+</html>

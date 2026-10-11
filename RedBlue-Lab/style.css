@@ -1,0 +1,108 @@
+:root{
+  --ink:#16202c; --ink2:#3d4d5c; --muted:#6b7c8d; --line:#d8e0e8;
+  --bg:#ffffff; --soft:#f4f7fa; --accent:#0077a3; --accent2:#0a5f80;
+  --ok:#0f7b4f; --okbg:#e8f6ef; --warn:#9a6200; --warnbg:#fdf3e0;
+  --bad:#a32020; --badbg:#fbecec; --info:#1f5c8f; --infobg:#eaf2fa;
+  --code:#1c2733; --codeink:#dce6f0;
+}
+*{box-sizing:border-box}
+html{-webkit-print-color-adjust:exact; print-color-adjust:exact}
+body{
+  font-family:"Segoe UI",-apple-system,Roboto,"Helvetica Neue",Arial,sans-serif;
+  color:var(--ink); background:var(--bg); margin:0; font-size:10.2pt; line-height:1.5;
+}
+.page{max-width:none; padding:0}
+@page{ size:A4; margin:16mm 14mm 16mm 14mm; }
+
+/* ---------- COVER ---------- */
+.cover{ height:247mm; display:flex; flex-direction:column; justify-content:space-between;
+  page-break-after:always; border-top:9mm solid var(--accent); padding-top:10mm }
+.cover .kicker{ font-size:9pt; letter-spacing:.18em; text-transform:uppercase; color:var(--accent2); font-weight:600 }
+.cover h1{ font-size:30pt; line-height:1.12; margin:6mm 0 4mm; color:var(--ink); letter-spacing:-.01em }
+.cover h2{ font-size:13pt; font-weight:400; color:var(--ink2); margin:0 0 10mm; line-height:1.4 }
+.cover .rule{ height:1.4mm; width:38mm; background:var(--accent); margin:8mm 0 }
+.cover .meta{ border-top:.3mm solid var(--line); padding-top:5mm; font-size:9.4pt; color:var(--ink2) }
+.cover .meta table{ width:100%; border-collapse:collapse }
+.cover .meta td{ padding:1.5mm 0; vertical-align:top }
+.cover .meta td:first-child{ color:var(--muted); width:38mm; font-weight:600 }
+.cover .note{ background:var(--soft); border-left:1.2mm solid var(--accent); padding:4mm 5mm;
+  font-size:9pt; color:var(--ink2); margin-top:8mm }
+
+/* ---------- HEADINGS ---------- */
+h1.sec{ font-size:19pt; margin:0 0 5mm; padding-bottom:2.5mm; border-bottom:.6mm solid var(--accent);
+  color:var(--ink); page-break-after:avoid; page-break-before:always; letter-spacing:-.01em }
+h1.sec.nobreak{ page-break-before:auto }
+h2{ font-size:13pt; margin:7mm 0 2.5mm; color:var(--accent2); page-break-after:avoid; font-weight:600 }
+h3{ font-size:11pt; margin:5mm 0 1.8mm; color:var(--ink); page-break-after:avoid; font-weight:600 }
+h4{ font-size:10pt; margin:4mm 0 1.5mm; color:var(--ink2); page-break-after:avoid; font-weight:600 }
+p{ margin:0 0 2.6mm; }
+ul,ol{ margin:0 0 3mm; padding-left:6mm }
+li{ margin-bottom:1.4mm }
+strong{ font-weight:600 }
+a{ color:var(--accent2); text-decoration:none }
+.lead{ font-size:10.8pt; color:var(--ink2); margin-bottom:4mm }
+.center{ text-align:center }
+
+/* ---------- CODE ---------- */
+pre{ background:var(--code); color:var(--codeink); padding:3mm 4mm; border-radius:1mm;
+  font-family:"Cascadia Mono",Consolas,"Courier New",monospace; font-size:8.5pt; line-height:1.45;
+  overflow:visible; white-space:pre-wrap; word-break:break-word; margin:0 0 3mm;
+  page-break-inside:avoid }
+pre.tight{ page-break-inside:avoid }
+code{ font-family:"Cascadia Mono",Consolas,"Courier New",monospace; font-size:9pt;
+  background:var(--soft); padding:.4mm 1.1mm; border-radius:.7mm; color:#0d3f55;
+  word-break:break-word }
+.cmt{ color:#7f95a8 }  /* comment */
+.prm{ color:#8fd0ff }  /* prompt/flag */
+.out{ color:#a9e3b8 }  /* output */
+.warnout{ color:#ffd08a }
+.erro{ color:#ff9b9b }
+
+/* ---------- TABLES ---------- */
+table.d{ width:100%; border-collapse:collapse; margin:0 0 4mm; font-size:8.9pt;
+  page-break-inside:avoid }
+table.d th{ background:var(--accent2); color:#fff; text-align:left; padding:2mm 2.4mm;
+  font-weight:600; font-size:8.6pt; border:.2mm solid var(--accent2) }
+table.d td{ padding:1.9mm 2.4mm; border:.2mm solid var(--line); vertical-align:top }
+table.d tr:nth-child(even) td{ background:var(--soft) }
+table.d td.c, table.d th.c{ text-align:center }
+table.d.wrap{ page-break-inside:auto }
+table.d.wrap tr{ page-break-inside:avoid }
+table.d td.mono{ font-family:"Cascadia Mono",Consolas,monospace; font-size:8.2pt }
+.tcap{ font-size:8.4pt; color:var(--muted); margin:-2mm 0 4mm; font-style:italic }
+
+/* ---------- CALLOUTS ---------- */
+.box{ padding:3mm 4mm; margin:0 0 4mm; border-radius:1mm; font-size:9.4pt;
+  page-break-inside:avoid; border-left:1.2mm solid }
+.box .bt{ font-weight:600; margin-bottom:1.2mm; display:block; font-size:9.6pt }
+.box p:last-child, .box ul:last-child, .box ol:last-child{ margin-bottom:0 }
+.b-info{ background:var(--infobg); border-color:var(--info) } .b-info .bt{ color:var(--info) }
+.b-warn{ background:var(--warnbg); border-color:var(--warn) } .b-warn .bt{ color:var(--warn) }
+.b-ok{ background:var(--okbg); border-color:var(--ok) } .b-ok .bt{ color:var(--ok) }
+.b-bad{ background:var(--badbg); border-color:var(--bad) } .b-bad .bt{ color:var(--bad) }
+.box p,.box li{ font-size:9.3pt }
+
+/* ---------- MISC ---------- */
+.step{ border:.3mm solid var(--line); border-left:1.2mm solid var(--accent2); border-radius:1mm;
+  padding:3mm 4mm; margin:0 0 3mm; page-break-inside:avoid; background:#fcfdfe }
+.step .sn{ display:inline-block; background:var(--accent2); color:#fff; font-weight:600;
+  font-size:8pt; padding:.6mm 2mm; border-radius:3mm; margin-right:2mm; vertical-align:1px }
+.step .st{ font-weight:600 }
+.kbd{ font-family:"Cascadia Mono",Consolas,monospace; font-size:8.4pt; background:#fff;
+  border:.25mm solid var(--line); border-bottom-width:.6mm; border-radius:1mm;
+  padding:.3mm 1.4mm; color:var(--ink) }
+.tag{ display:inline-block; font-size:7.6pt; font-weight:600; padding:.4mm 1.6mm; border-radius:.8mm;
+  color:#fff; vertical-align:1px }
+.t-lo{ background:#5b8fb0 } .t-md{ background:var(--warn) } .t-hi{ background:#d1701f } .t-crit{ background:var(--bad) }
+.t-ok{ background:var(--ok) } .t-neu{ background:#7c8b9a }
+hr.thin{ border:0; border-top:.2mm solid var(--line); margin:6mm 0 }
+.flow{ background:var(--soft); border:.3mm solid var(--line); border-radius:1mm; padding:4mm;
+  margin:0 0 4mm; font-size:9pt; text-align:center; line-height:2 }
+.flow .n{ background:var(--accent2); color:#fff; border-radius:1mm; padding:.8mm 2.4mm;
+  font-weight:600; font-size:8.6pt }
+.flow .ar{ color:var(--muted); margin:0 1.6mm; font-weight:600 }
+.mcol{ display:flex; gap:5mm } .mcol > div{ flex:1 }
+.toc{ font-size:9.6pt } .toc div{ padding:1.5mm 0; border-bottom:.2mm dotted var(--line) }
+.toc .n{ color:var(--muted); display:inline-block; width:9mm }
+.pb{ page-break-before:always }
+.noimg{ font-size:8.4pt; color:var(--muted); font-style:italic; margin:-1mm 0 3mm }

@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Wazuh Detection Companion &mdash; Every Windows Attack You Could Run, and What to Search For</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="page">
+
+<!-- ==================== COVER ==================== -->
+<div class="cover">
+  <div>
+    <div class="kicker">SIEM Lab &middot; Volume 5 &middot; Detection Companion</div>
+    <h1>The Wazuh Detection Companion<br>for Windows Server Attacks</h1>
+    <div class="rule"></div>
+    <h2>The blue side of your lab, as a reference. Every technique you practise in
+        Volumes&nbsp;3&ndash;4 is listed here with the Windows Event&nbsp;IDs that expose it, the exact
+        Wazuh dashboard search that finds it, and the rule to write if the stock rules miss it.</h2>
+    <div class="meta">
+      <table>
+        <tr><td>Side of the bench</td><td><strong>Defender / detection</strong> &mdash; read this while logged into Wazuh</td></tr>
+        <tr><td>SIEM</td><td>SIEM-Ubuntu <code>10.0.0.40</code> &mdash; Wazuh 4.14.8 (manager, indexer, dashboard, filebeat)</td></tr>
+        <tr><td>Monitored hosts</td><td>WinServer DC <code>10.0.0.10</code> (agent <code>002</code> "Server"), Kali <code>10.0.0.30</code> (agent <code>001</code>)</td></tr>
+        <tr><td>Dashboard</td><td><code>https://127.0.0.1:4433</code> &mdash; <code>admin</code> / <code>&lt;MANAGER_PASSWORD&gt;</code></td></tr>
+        <tr><td>How to use it</td><td>Attack with Volume&nbsp;4 open, keep this as the lookup table beside it. Every search below is copy-paste into the Alerts search bar.</td></tr>
+      </table>
+    </div>
+    <div class="note">
+      <strong>Detection is the safer start.</strong> This document contains no attack commands &mdash;
+      only the signs to watch for. Pair it with Volume&nbsp;4: it is what the dashboard looks like from
+      the chair you should deserve to sit in.
+    </div>
+  </div>
+</div>
+
+<!-- ==================== SCOPE ==================== -->
+<h1 class="sec nobreak">Scope &mdash; what this reference covers</h1>
+
+<p class="lead">One page of truth first, then the matrix. Wazuh does not invent Windows telemetry &mdash;
+it ships what the Windows auditing subsystem records. The difference between a quiet lab and a
+deafening one is almost always <strong>audit policy being turned on</strong>.</p>
+
+<div class="box b-ok">
+  <span class="bt">The five Wazuh fields you will actually use</span>
+  <table class="d">
+    <tr><th style="width:34%">Field</th><th What it holds</th></tr>
+    <tr><td class="mono">agent.name</td><td>Which machine (use &lt;SERVER&gt; or the agent name you chose).</td></tr>
+    <tr><td class="mono">data.win.system.eventID</td><td>The Windows Event&nbsp;ID (e.g. <code>4625</code>). Older indexes: <code>win.system.eventID</code>.</td></tr>
+    <tr><td class="mono">data.win.system.severity</td><td>The source's own severity hint, if present.</td></tr>
+    <tr><td class="mono">rule.level</td><td>Wazuh's 0&ndash;15 assessment. 8+ = investigate, 12+ = respond.</td></tr>
+    <tr><td class="mono">rule.groups</td><td>Tags like <code>windows</code>, <code>sysmon</code>, <code>authentication_failures</code>.</td></tr>
+  </table>
+</div>
+
+<p>To confirm which field names your install uses, click any <code>4625</code> alert and inspect its
+JSON &mdash; it takes ten seconds and removes all guesswork.</p>
+
+<!-- ==================== TOC ==================== -->
+<h1 class="sec nobreak">Contents</h1>
+<div class="toc">
+  <div><span class="n">1</span> Making sure Windows and Wazuh are actually talking (audit policy first)</div>
+  <div><span class="n">2</span> The detection matrix &mdash; technique &rarr; Event IDs &rarr; search</div>
+  <div><span class="n">3</span> Timeline reads: four signature searches for Volume&nbsp;4's phases</div>
+  <div><span class="n">4</span> Writing local rules for the gaps (the 4662 problem, 4625 frequency)</div>
+  <div><span class="n">5</span> Tuning: from "everything" to "everything interesting"</div>
+  <div><span class="n">6</span> Keeping the pipeline alive (and the filebeat fix that matters)</div>
+  <div><span class="n">7</span> Cheat sheet of searches</div>
+  <div><span class="n">A</span> Coverage table for your report</div>
+</div>
+
+<!-- ==================== PART 1 ==================== -->
+<h1 class="sec">1 &nbsp;First: make sure Windows will tell you anything</h1>
+
+<p class="lead">Wazuh's agent forwards events Windows already logged. If audit policy is off, attacks
+slip past silently no matter how good your SIEM is. Run this on the DC (console or shell) once:</p>
+
+<pre>auditpol /get /category:* | findstr /i "Logon Advanced Audit"</pre>
+<table class="d">
+  <tr><th style="width:46%">Audit category to confirm</th><th>Key subcategories</th></tr>
+  <tr><td><strong>Logon/Logoff</strong></td><td>Logon, Logoff, Account Lockout &mdash; feeds <code>4624/4625/4740</code></td></tr>
+  <tr><td><strong>Account Logon</strong></td><td>Kerberos Service Ticket, Kerberos Authentication Service &mdash; feeds <code>4768/4769</code></td></tr>
+  <tr><td><strong>Detailed Tracking</strong></td><td>Process Creation (with command line) &mdash; feeds <code>4688</code> and <code>4104</code></td></tr>
+  <tr><td><strong>DS Access</strong></td><td>Directory Service Access &mdash; feeds the DCSync <code>4662</code></td></tr>
+  <tr><td><strong>Account Management</strong></td><td>User/Group Management &mdash; feeds <code>4720/4732</code></td></tr>
+</table>
+
+<div class="step"><span class="sn">1</span><span class="st">Turn on process command-line auditing (huge for any red-team lab):</span>
+<pre>reg add "HKLM\Software\Microsoft\Windows\CurrentVersion\Policies\System\Audit" ^
+  /v ProcessCreationIncludeCmdLine_Enabled /t REG_QWORD /d 1 /f</pre></div>
+
+<div class="step"><span class="sn">2</span><span class="st">Turn on the other categories if they read "No Auditing":</span>
+<pre>auditpol /set /subcategory:"Logon" /success:enable /failure:enable
+auditpol /set /subcategory:"Logoff" /success:enable /failure:enable
+auditpol /set /subcategory:"Account Lockout" /success:enable /failure:enable
+auditpol /set /subcategory:"Kerberos Service Ticket Operations" /success:enable /failure:enable
+auditpol /set /subcategory:"Kerberos Authentication Service" /success:enable /failure:enable
+auditpol /set /subcategory:"Process Creation" /success:enable /failure:enable
+auditpol /set /subcategory:"Directory Service Access" /success:enable /failure:enable
+auditpol /set /subcategory:"User Account Management" /success:enable /failure:enable
+auditpol /set /subcategory:"Security Group Management" /success:enable /failure:enable</pre></div>
+
+<div class="step"><span class="sn">3</span><span class="st">On the DC, also flag the object that DCSync touches (so <code>4662</code> fires):</span>
+<pre>Set-ADObject -Identity "CN=Replicator,CN=Users,DC=corp,DC=local" ^
+  -Audio:Apply- 2>$null
+auditpol /set /subcategory:"Directory Service Access" /success:enable /failure:enable</pre>
+<p style="margin-top:2mm">Full replication-GUID auditing is a small project (Volume&nbsp;5 does not
+batch it for you). The reliable lab shortcut: pair Sara's guidance on
+"Directory Service Access" with the search in Part&nbsp;2 &mdash; seeing <em>some</em> DS-access events
+is a good start.</p></div>
+
+<div class="box b-warn">
+  <span class="bt">The settings that make a lab honest</span>
+  <p>No audit policy = no events = no fun. Before every campaign, confirm the DC logs
+  <code>4624/4625/4688</code>. It takes two minutes and saves an hour of "why is Wazuh quiet?".</p>
+</div>
+
+<!-- ==================== PART 2 ==================== -->
+<h1 class="sec">2 &nbsp;The detection matrix</h1>
+
+<p class="lead">Technique on the left, the Event&nbsp;IDs that expose it in the middle, the copy-paste
+search on the right. Change <code>&lt;SERVER&gt;</code> to your agent name.</p>
+
+<table class="d wrap">
+  <tr><th style="width:22%">Technique (Volume&nbsp;4 phase)</th><th class="c" style="width:22%">Event IDs</th><th>Wazuh dashboard search</th></tr>
+  <tr><td><strong>Scanning footprint</strong> (2)</td><td class="c">5200-series kittens / noisy SMB</td><td class="mono">agent.name:&lt;SERVER&gt; AND data.win.system.eventID:4625</td></tr>
+  <tr><td><strong>Username enumeration via Kerberos</strong> (3)</td><td class="c">4768, 4771</td><td class="mono">agent.name:&lt;SERVER&gt; AND data.win.system.eventID:(4768 OR 4771)</td></tr>
+  <tr><td><strong>Password spray / brute force</strong> (4.2)</td><td class="c">4625, 4740</td><td class="mono">agent.name:&lt;SERVER&gt; AND data.win.system.eventID:4625</td></tr>
+  <tr><td><strong>Lockout (went too fast)</strong> (4.2)</td><td class="c">4740</td><td class="mono">agent.name:&lt;SERVER&gt; AND data.win.system.eventID:4740</td></tr>
+  <tr><td><strong>AS-REP roasting</strong> (4.3)</td><td class="c">4768 (odd pre-auth)</td><td class="mono">agent.name:&lt;SERVER&gt; AND data.win.system.eventID:4768</td></tr>
+  <tr><td><strong>Kerberoasting</strong> (4.4)</td><td class="c">4769 (RC4 if present)</td><td class="mono">agent.name:&lt;SERVER&gt; AND data.win.system.eventID:4769</td></tr>
+  <tr><td><strong>SMB share enumeration</strong> (3.1)</td><td class="c">&mdash; (or 4625)</td><td class="mono">agent.name:&lt;SERVER&gt; AND data.win.system.eventID:4625</td></tr>
+  <tr><td><strong>Successful network logon (shell)</strong> (5)</td><td class="c">4624</td><td class="mono">agent.name:&lt;SERVER&gt; AND data.win.system.eventID:4624</td></tr>
+  <tr><td><strong>Remote command execution</strong> (5.1)</td><td class="c">4688</td><td class="mono">agent.name:&lt;SERVER&gt; AND data.win.system.eventID:4688</td></tr>
+  <tr><td><strong>PowerShell abuse</strong> (5.2)</td><td class="c">4104, 4103</td><td class="mono">agent.name:&lt;SERVER&gt; AND data.win.system.eventID:4104</td></tr>
+  <tr><td><strong>DCSync (replication read)</strong> (6.1)</td><td class="c">4662 (replication GUIDs)</td><td class="mono">agent.name:&lt;SERVER&gt; AND data.win.system.eventID:4662</td></tr>
+  <tr><td><strong>Pass-the-Hash</strong> (6.2)</td><td class="c">4624 (logon type 3, odd session)</td><td class="mono">agent.name:&lt;SERVER&gt; AND data.win.system.eventID:4624</td></tr>
+  <tr><td><strong>Account creation / group add (impact)</strong> (6.3)</td><td class="c">4720, 4732, 4726</td><td class="mono">agent.name:&lt;SERVER&gt; AND data.win.system.eventID:(4720 OR 4732 OR 4726)</td></tr>
+  <tr><td><strong>Privileged logon</strong> (happy path)</td><td class="c">4672</td><td class="mono">agent.name:&lt;SERVER&gt; AND data.win.system.eventID:4672</td></tr>
+</table>
+
+<div class="box b-info">
+  <span class="bt">The DCSync detail</span>
+  <p><code>4662</code> matters only when the object GUID matches the replication pair
+  <code>1131f6aa-&hellip;</code> / <code>1131f6ad-&hellip;</code>. On an untuned install you may see
+  every DS access &mdash; filter, don't disable. The search above is your starting point; refine it to
+  the GUID once you confirm your index layout.</p>
+</div>
+
+<!-- ==================== PART 3 ==================== -->
+<h1 class="sec">3 &nbsp;Timeline reads &mdash; four searches that tell the whole story</h1>
+
+<p class="lead">Instead of chasing single events, read the attack as a timeline. These four searches,
+run in order with a time window, reproduce the intrusion the way a security operations centre would.</p>
+
+<h2>3.1 The entrance</h2>
+<pre>agent.name:&lt;SERVER&gt; AND rule.level:&gt;=8 AND !(data.win.system.eventID:(4662))</pre>
+<p class="tcap">&ldquo;Everything notable on the DC that is not routine DS access.&rdquo; First look of every shift.</p>
+
+<h2>3.2 The brute that opened the door</h2>
+<pre>agent.name:&lt;SERVER&gt; AND data.win.system.eventID:4625
+<span class="cmt"># then flip '4625' to '4624' in the same window to find the success that followed</span></pre>
+
+<h2>3.3 The hands-on-keyboard part</h2>
+<pre>agent.name:&lt;SERVER&gt; AND data.win.system.eventID:(4688 OR 4104)</pre>
+
+<h2>3.4 The payoff</h2>
+<pre>agent.name:&lt;SERVER&gt; AND data.win.system.eventID:4662</pre>
+<p class="tcap">If you see 4625 &rarr; 4624 &rarr; 4688/4104 &rarr; 4662 in sequence from <code>10.0.0.30</code>,
+you are looking at a replay of Volume&nbsp;4. That ordering is the fingerprint to hunt for.</p>
+
+<!-- ==================== PART 4 ==================== -->
+<h1 class="sec">4 &nbsp;Writing local rules for the gaps</h1>
+
+<p class="lead">Stock Wazuh is good, but your lab has two classic gaps. Volume&nbsp;1 showed the
+<code>local_rules.xml</code> mechanics; here are the two rules worth having.</p>
+
+<h2>4.1 The 4662 problem &mdash; detect DCSync even without full GUID tuning</h2>
+<p>If replication-file auditing is too fiddly, catch the <em>shape</em>: a single source object access
+read storm on the DS from a non-DC host. A frequency rule is the honest fix:</p>
+<pre>&lt;rule id="100120" level="12" frequency="6" timeframe="120"&gt;
+  &lt;if_sid&gt;60122&lt;/if_sid&gt;
+  &lt;same_source_ip /&gt;
+  &lt;description&gt;Rapid LDAP object access from one source - possible DCSync enumeration&lt;/description&gt;
+  &lt;mitre&gt;&lt;id&gt;T1003.006&lt;/id&gt;&lt;/mitre&gt;
+&lt;/rule&gt;</pre>
+<ul>
+  <li><code>frequency="6" timeframe="120"</code> &mdash; six matching events within two minutes.</li>
+  <li><code>same_source_ip</code> &mdash; the six must come from one host.</li>
+  <li><code>if_sid 60122</code> &mdash; an existing logon/DS rule to chain onto; adjust to a rule your
+  install actually fires (search <code>data.win.system.eventID:4662</code> in Dev&nbsp;Tools &rarr; Rules).</li>
+</ul>
+
+<h2>4.2 Spray / brute-force frequency rule (catch it before lockout)</h2>
+<pre>&lt;rule id="100121" level="10" frequency="8" timeframe="180"&gt;
+  &lt;if_sid&gt;60122&lt;/if_sid&gt;
+  &lt;same_source_ip /&gt;
+  &lt;description&gt;Eight or more Windows logon failures from one source in 3 minutes&lt;/description&gt;
+  &lt;mitre&gt;&lt;id&gt;T1110.003&lt;/id&gt;&lt;/mitre&gt;
+&lt;/rule&gt;</pre>
+
+<h2>4.3 Deploy and verify</h2>
+<pre>sudo /var/ossec/bin/wazuh-logtest -t
+sudo systemctl restart wazuh-manager
+sudo /var/ossec/bin/agent_control -R 002      <span class="cmt"># agent 002 = WinServer; refresh its config</span></pre>
+<p class="tcap">Then re-run the spray from Volume&nbsp;4 and watch <code>100121</code> fire around guess eight. A rule that never fires in Wazuh is a rule you never tested.</p>
+
+<!-- ==================== PART 5 ==================== -->
+<h1 class="sec">5 &nbsp;Tuning: from "everything" to "everything interesting"</h1>
+
+<ul>
+  <li><strong>Start at level 8.</strong> Low-severity noise (cron, sudo, routine logins) will drown you. Triage at <code>rule.level:&gt;=8</code>, drill down only when investigating.</li>
+  <li><strong>Filter to the agent that matters.</strong> A lab with Kali + DC + client is three very different noise profiles. Separate them with <code>agent.name:&lt;HOST&gt;</code>.</li>
+  <li><strong>Baseline before you attack.</strong> Spend one hour just watching; what fires normally becomes boring, and only the deltas deserve your attention.</li>
+  <li><strong>Suppress, don't disable.</strong> When a rule is useless, lower it in <code>local_rules.xml</code> rather than deleting the group, so you can raise it later.</li>
+  <li><strong>Alert fatigue is the enemy.</strong> If everything is critical, nothing is. Ten tuned medium rules beat 200 shrieking ones.</li>
+</ul>
+
+<!-- ==================== PART 6 ==================== -->
+<h1 class="sec">6 &nbsp;Keeping the pipeline alive</h1>
+
+<p class="lead">A SIEM you do not maintain is a screenshot, not a security tool. Two things keep this
+lab honest: know the arrow, and know the failure that broke it once before.</p>
+
+<h2>6.1 The arrow</h2>
+<div class="flow">
+  <span class="n">Agent</span><span class="ar">&rarr;</span>
+  <span class="n">manager</span><span class="ar">&rarr;</span>
+  <span class="n">alerts.json</span><span class="ar">&rarr;</span>
+  <span class="n">filebeat</span><span class="ar">&rarr;</span>
+  <span class="n">indexer</span><span class="ar">&rarr;</span>
+  <span class="n">dashboard</span>
+</div>
+<p class="tcap">When something does not appear in the UI, debug along this arrow in this order.</p>
+
+<h2>6.2 The one that bit you (and now lives in your playbook)</h2>
+<div class="box b-warn">
+  <span class="bt">filebeat crashed at boot with a seccomp error &mdash; fixed 10&nbsp;Oct&nbsp;2026</span>
+  <p>Symptom: <code>wazuh-manager/indexer/dashboard</code> all <code>active</code>, filebeat
+  <code>failed</code>, dashboard showing no new alerts. Logs screamed
+  <code>runtime/cgo: pthread_create failed: Operation not permitted</code> &mdash; filebeat's
+  built-in seccomp filter does not allow the <code>clone3</code> syscall that glibc uses on a new
+  kernel (Ubuntu 26.04 / kernel&nbsp;7.0), so the very first extra thread kills the process.</p>
+  <p style="margin-top:2mm">Fix applied: appended to <code>/etc/filebeat/filebeat.yml</code>:</p>
+<pre>seccomp:
+  enabled: false</pre>
+  <p style="margin-top:2mm">Then <code>sudo systemctl reset-failed filebeat</code> and
+  <code>sudo systemctl start filebeat</code>. Credentials resolve from the filebeat keystore
+  (<code>/var/lib/filebeat/filebeat.keystore</code>), not the config.</p>
+</div>
+
+<h2>6.3 Routine health check (one line)</h2>
+<pre>systemctl is-active wazuh-manager wazuh-indexer wazuh-dashboard filebeat
+sudo curl -sk -u 'admin:&lt;your-admin-pass&gt;' 'https://127.0.0.1:9200/_cluster/health?pretty'</pre>
+<p class="tcap">Four <code>active</code> + cluster <code>green</code> = the pipeline is fine and any
+quietness is a <em>detection</em> problem, not an <em>infrastructure</em> problem.</p>
+
+<!-- ==================== PART 7 ==================== -->
+<h1 class="sec">7 &nbsp;Cheat sheet of searches</h1>
+
+<table class="d wrap">
+  <tr><th style="width:30%">Question</th><th>Search</th></tr>
+  <tr><td>Everything high on the DC</td><td class="mono">agent.name:&lt;SERVER&gt; AND rule.level:&gt;=8</td></tr>
+  <tr><td>Failed logons</td><td class="mono">agent.name:&lt;SERVER&gt; AND data.win.system.eventID:4625</td></tr>
+  <tr><td>Successful logon</td><td class="mono">agent.name:&lt;SERVER&gt; AND data.win.system.eventID:4624</td></tr>
+  <tr><td>Process creation</td><td class="mono">agent.name:&lt;SERVER&gt; AND data.win.system.eventID:4688</td></tr>
+  <tr><td>Kerberos activity</td><td class="mono">agent.name:&lt;SERVER&gt; AND data.win.system.eventID:(4768 OR 4769 OR 4771)</td></tr>
+  <tr><td>Lockouts</td><td class="mono">agent.name:&lt;SERVER&gt; AND data.win.system.eventID:4740</td></tr>
+  <tr><td>Account changes (impact)</td><td class="mono">agent.name:&lt;SERVER&gt; AND data.win.system.eventID:(4720 OR 4732 OR 4726)</td></tr>
+  <tr><td>DCSync attempt</td><td class="mono">agent.name:&lt;SERVER&gt; AND data.win.system.eventID:4662</td></tr>
+  <tr><td>PowerShell</td><td class="mono">agent.name:&lt;SERVER&gt; AND data.win.system.eventID:4104</td></tr>
+  <tr><td>From the attacker IP</td><td class="mono">data.win.eventdata.ipAddress:10.0.0.30</td></tr>
+</table>
+
+<!-- ==================== APPENDIX A ==================== -->
+<h1 class="sec">Appendix A &nbsp;Coverage table for your report</h1>
+
+<p class="lead">Fill the last two columns over your next campaign. A detection that fired, with an event
+ID you can prove, is worth a hundred slides.</p>
+
+<table class="d wrap">
+  <tr><th class="c" style="width:6%">#</th><th style="width:26%">Technique</th><th class="c" style="width:18%">Event ID(s)</th><th class="c" style="width:16%">Search in Wazuh?</th><th class="c" style="width:16%">Fired in run?</th><th>Notes</th></tr>
+  <tr><td class="c">1</td><td>Brute force / spray</td><td class="mono c">4625, 4740</td><td class="c">&nbsp;</td><td class="c">&nbsp;</td><td>&nbsp;</td></tr>
+  <tr><td class="c">2</td><td>AS-REP roast</td><td class="mono c">4768</td><td class="c">&nbsp;</td><td class="c">&nbsp;</td><td>&nbsp;</td></tr>
+  <tr><td class="c">3</td><td>Kerberoast</td><td class="mono c">4769</td><td class="c">&nbsp;</td><td class="c">&nbsp;</td><td>&nbsp;</td></tr>
+  <tr><td class="c">4</td><td>Shell (WinRM/SMB)</td><td class="mono c">4624</td><td class="c">&nbsp;</td><td class="c">&nbsp;</td><td>&nbsp;</td></tr>
+  <tr><td class="c">5</td><td>Command execution</td><td class="mono c">4688</td><td class="c">&nbsp;</td><td class="c">&nbsp;</td><td>&nbsp;</td></tr>
+  <tr><td class="c">6</td><td>DCSync</td><td class="mono c">4662</td><td class="c">&nbsp;</td><td class="c">&nbsp;</td><td>&nbsp;</td></tr>
+  <tr><td class="c">7</td><td>Account creation</td><td class="mono c">4720, 4732</td><td class="c">&nbsp;</td><td class="c">&nbsp;</td><td>&nbsp;</td></tr>
+</table>
+
+<div class="box b-ok">
+  <span class="bt">The loop is complete.</span>
+  <p>Attack it (Volume&nbsp;4), detect it (this volume), fix it (Volume&nbsp;2/3&rsquo;s remediation),
+  and re-run. A repo with all five documents is not just study notes &mdash; it is a finished portfolio
+  artifact. The jobs you are aiming for spend their days exactly here.</p>
+</div>
+
+</div>
+</body>
+</html>

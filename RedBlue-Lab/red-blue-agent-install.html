@@ -1,0 +1,976 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Red/Blue Lab &mdash; Installing the Wazuh Agent on Windows Server and Windows Client</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div class="cover">
+  <div>
+    <div class="kicker">Hands-on lab manual &middot; Volume 3</div>
+    <h1>Installing the Wazuh Agent on Windows Server and Windows Client</h1>
+    <h2>Turning two unmonitored Windows machines into a red/blue lab you can
+        actually test against &mdash; and understanding every step.</h2>
+    <div class="rule"></div>
+  </div>
+
+  <div class="meta">
+    <table>
+      <tr><td>What you will do</td><td>Install the Wazuh agent on a Windows Server 2022 VM and a Windows 11 client VM, enrol both into your existing Wazuh manager, then confirm you can see them in the dashboard</td></tr>
+      <tr><td>Why it matters</td><td>Right now your attacker VM is monitored and your two Windows targets are blind. You cannot detect what you cannot see, and you cannot close a gap you never measured.</td></tr>
+      <tr><td>Lab network</td><td>VirtualBox <code>intnet</code>, <code>10.0.0.0/24</code>, fully isolated from the host</td></tr>
+      <tr><td>Manager</td><td>SIEM-Ubuntu, Wazuh 4.14.8, <code>10.0.0.40</code></td></tr>
+      <tr><td>Targets</td><td>WinServer 2022 <code>10.0.0.50</code> &middot; WindowsClient (Win11)</td></tr>
+      <tr><td>Attacker</td><td>Kali <code>10.0.0.30</code> (already enrolled as agent 001)</td></tr>
+      <tr><td>Time</td><td>About 15 minutes for the first machine, 5 for the second</td></tr>
+      <tr><td>Scope</td><td>Your own isolated lab VMs only</td></tr>
+    </table>
+  </div>
+
+  <div class="note">
+    <strong>Read this first.</strong> Everything in this document runs against
+    VirtualBox machines on your own laptop, on a network segment that is not
+    reachable from your physical network or the internet. That is what makes it
+    safe to practise offensive technique here. Keep it that way: if you ever
+    point these steps at a machine you do not own, that is a different activity
+    with different rules.
+  </div>
+</div>
+
+<!-- ==================== 0 ==================== -->
+<h1 class="sec">0 &nbsp;Quick start &mdash; the whole thing on one page</h1>
+
+<p class="lead">If you just want it working, this page is enough. Everything
+after it explains why each step is the way it is.</p>
+
+<h2>0.1 Files you need</h2>
+
+<table class="d">
+  <tr><th style="width:38%">File</th><th>Purpose</th></tr>
+  <tr><td class="mono">Install-WazuhAgent.ps1</td><td>The installer you run on each Windows VM. Self-contained, no other files needed.</td></tr>
+  <tr><td class="mono">red-blue-agent-install.html</td><td>Source of this document, if you want to edit it.</td></tr>
+  <tr><td class="mono">RedBlue-Lab-Vol3-Wazuh-Agent-Windows-Install.pdf</td><td>This document.</td></tr>
+  <tr><td class="mono">style.css</td><td>Shared print styling used to build the PDF.</td></tr>
+  <tr><td class="mono">build_pdfs.py</td><td>Renders the HTML to PDF using headless Edge.</td></tr>
+  <tr><td class="mono">check_html.py</td><td>Validates the HTML: tag balance, entities, table widths.</td></tr>
+  <tr><td class="mono">verify_pdfs.py / validate.py</td><td>Checks the built PDF for page count, text and content.</td></tr>
+  <tr><td class="mono">probe_msi.py</td><td>Dumps the real MSI property names out of the installer.</td></tr>
+</table>
+
+<p class="tcap">All of the above live in <code>C:\Users\pc\Desktop\RedBlue-Lab</code>.</p>
+
+<h2>0.2 The five steps</h2>
+
+<table class="d">
+  <tr><th style="width:6%">#</th><th style="width:26%">Do this</th><th>Where</th></tr>
+  <tr><td class="c">1</td><td>Power on the VMs</td><td>Host: <code>VBoxManage startvm "SIEM-Ubuntu" --type headless</code> and the same for Kali. Confirm Wazuh is up on SIEM-Ubuntu.</td></tr>
+  <tr><td class="c">2</td><td>Give the Windows VMs internet</td><td>Host, VMs powered off: <code>VBoxManage modifyvm "WinServer" --nic2 nat --nictype2 82540EM</code> and the same for WindowsClient.</td></tr>
+  <tr><td class="c">3</td><td>Run the script on WinServer</td><td>Admin PowerShell on the VM, see 0.3.</td></tr>
+  <tr><td class="c">4</td><td>Run the script on WindowsClient</td><td>Admin PowerShell on the VM, see 0.3.</td></tr>
+  <tr><td class="c">5</td><td>Confirm in the dashboard</td><td>Agents &rarr; both machines Active within about 30 seconds. See section 4.</td></tr>
+</table>
+
+<h2>0.3 The two commands you actually type</h2>
+
+<pre><span class="cmt"># on WinServer 2022 (10.0.0.50)</span>
+powershell -ExecutionPolicy Bypass -File .\Install-WazuhAgent.ps1 `
+  -AgentName winsrv-01 -AgentGroup windows,servers
+
+<span class="cmt"># on WindowsClient (Win11)</span>
+powershell -ExecutionPolicy Bypass -File .\Install-WazuhAgent.ps1 `
+  -AgentName wincli-01 -AgentGroup windows,endpoints</pre>
+
+<p>If the script is not in the current directory, give the full path:</p>
+
+<pre>powershell -ExecutionPolicy Bypass `
+  -File C:\Users\pc\Desktop\RedBlue-Lab\Install-WazuhAgent.ps1 `
+  -AgentName winsrv-01 -AgentGroup windows,servers</pre>
+
+<p>If PowerShell refuses to run it, the file may be blocked. Unblock it once:</p>
+
+<pre>Unblock-File .\Install-WazuhAgent.ps1</pre>
+
+<h2>0.4 How to undo everything</h2>
+
+<table class="d">
+  <tr><th style="width:40%">Change</th><th>How to revert</th></tr>
+  <tr><td>The NAT adapter</td><td><code>VBoxManage modifyvm "WinServer" --nic2 none</code> (and WindowsClient). The agent keeps working; it only needed the internet to download itself.</td></tr>
+  <tr><td>The agent on a VM</td><td>Apps &rarr; Installed apps &rarr; Wazuh Agent &rarr; Uninstall, or:</td></tr>
+  <tr><td class="mono">&nbsp;</td><td class="mono">msiexec /x {840F372A-2C20-49B9-A164-D8A14E8E8D47} /quiet</td></tr>
+  <tr><td>Leftover files</td><td><code>Remove-Item "C:\Program Files (x86)\ossec-agent" -Recurse -Force</code></td></tr>
+  <tr><td>The firewall rule</td><td><code>Get-NetFirewallRule -DisplayName 'Wazuh Agent 1514' | Remove-NetFirewallRule</code></td></tr>
+  <tr><td>The agent in the dashboard</td><td>Agents &rarr; row &rarr; &hellip; &rarr; Delete. This removes its history too.</td></tr>
+</table>
+
+<div class="box b-warn">
+  <span class="bt">Get the product code before you uninstall, do not assume it</span>
+  <p>The GUID above is the one from the 4.14.8 MSI, which is what the script
+  downloads. Confirm yours matches before relying on it, because it changes
+  between versions:</p>
+  <pre>Get-ItemProperty HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\* |
+  Where-Object DisplayName -eq 'Wazuh Agent' | Select-Object DisplayVersion, PSChildName</pre>
+</div>
+
+<h2>0.5 If it goes wrong, look here first</h2>
+
+<table class="d">
+  <tr><th style="width:40%">Symptom</th><th>Immediate cause</th></tr>
+  <tr><td class="mono">Service 'Wazuh' does not exist</td><td>The service is <strong>WazuhSvc</strong>, not Wazuh. Every guide gets this wrong.</td></tr>
+  <tr><td class="mono">MSI returns 0 but nothing installed</td><td>Argument list built into a variable named <code>$args</code>. See 5.3.</td></tr>
+  <tr><td class="mono">ERROR (1208) enrolment</td><td>Port 55000 unreachable. Start the manager, or check the manager IP.</td></tr>
+  <tr><td class="mono">Download hangs</td><td>No internet route. Add the NAT adapter, or use <code>-SkipDownload</code>.</td></tr>
+  <tr><td class="mono">Installed but not in the dashboard</td><td>Wrong manager IP, or the agent is using the NAT address instead of 10.0.0.x.</td></tr>
+</table>
+
+<!-- ==================== 1 ==================== -->
+<h1 class="sec">1 &nbsp;The gap you are closing</h1>
+
+<p class="lead">Before installing anything, it helps to be precise about what is
+missing, because "install an agent" is a vague goal and vague goals produce
+half-finished labs.</p>
+
+<table class="d">
+  <tr><th style="width:26%">Machine</th><th style="width:18%">Role</th><th style="width:20%">Status today</th><th>After this lab</th></tr>
+  <tr><td><strong>SIEM-Ubuntu</strong></td><td>Wazuh manager</td><td class="c">Running, agent 001</td><td>Unchanged. It is the brain; it already works.</td></tr>
+  <tr><td><strong>Kali</strong></td><td>Attacker</td><td class="c">Enrolled, active</td><td>Unchanged. Your red side already reports.</td></tr>
+  <tr><td><strong>WinServer</strong></td><td>Server target</td><td class="c"><span class="tag t-hi">No agent</span></td><td>Enrolled. Every login, process and file change is visible.</td></tr>
+  <tr><td><strong>WindowsClient</strong></td><td>Client target</td><td class="c"><span class="tag t-hi">No agent</span></td><td>Enrolled. Same coverage, endpoint-class rules.</td></tr>
+</table>
+
+<div class="box b-warn">
+  <span class="bt">The asymmetry that makes this lab worth building</span>
+  <p>Your attacker machine is monitored but your targets are not. That is the
+  exact inverse of a real breach, where the victim is instrumented and the
+  attacker's own box usually is not. As it stands, if you run an attack from
+  Kali against WinServer, the only machine that will record it is Kali. The
+  server you are compromising generates no telemetry at all.</p>
+  <p>Enrolling the two Windows machines turns that around. Now the same attack
+  produces evidence on both ends, and you get to practise the skill that
+  actually matters: reading the victim's logs and working out what happened.</p>
+</div>
+
+<h2>1.1 What the agent actually is, in plain terms</h2>
+
+<p>A Wazuh agent is a small Windows service, about 15&nbsp;MB installed, that
+does three things continuously:</p>
+
+<ol>
+  <li><strong>Reads</strong> security-relevant things on the host: Windows event
+      logs, running processes, listening ports, installed software, file integrity
+      changes, and security configuration.</li>
+  <li><strong>Evaluates</strong> each event against thousands of built-in
+      detection rules, locally.</li>
+  <li><strong>Ships</strong> only what matters, encrypted, to your manager. A
+      normal morning generates a trickle of data. A port scan or a failed
+      password spray generates alerts.</li>
+</ol>
+
+<p>Because the filtering happens on the endpoint, you are not shipping raw
+event logs across the network. That is the single most important architectural
+idea to understand: <strong>the agent is a filter, not a pipe.</strong></p>
+
+<h2>1.2 Ports involved</h2>
+
+<table class="d">
+  <tr><th style="width:14%">Port</th><th style="width:24%">Purpose</th><th>Direction and who initiates</th></tr>
+  <tr><td class="mono">1514</td><td>Events and alerts</td><td>Agent <strong>connects out</strong> to the manager. Outbound is allowed by default, so no inbound rule is strictly required.</td></tr>
+  <tr><td class="mono">55000</td><td>Enrolment (authd)</td><td>Agent connects out to request a key at first start. Must be reachable or the agent installs but never registers.</td></tr>
+  <tr><td class="mono">443</td><td>Wazuh dashboard</td><td>Your browser, on the manager. This is what you will actually look at.</td></tr>
+</table>
+
+<div class="box b-info">
+  <span class="bt">Do not open 55000 or 9200 to your lab subnet</span>
+  <p>55000 is the enrolment service and 9200 is the indexer API. Neither needs to
+  be reachable from the machines you monitor. Opening them broadly is a real and
+  extremely common mistake, and it shows up as a finding in most security
+  assessments. Your guide material makes the same point; it is worth
+  internalising rather than copying.</p>
+</div>
+
+<!-- ==================== 2 ==================== -->
+<h1 class="sec">2 &nbsp;One change to your VMs, and why</h1>
+
+<p class="lead">There is a practical problem to solve before the install can
+work, and understanding it teaches something about how VirtualBox networking
+actually works.</p>
+
+<h2>2.1 The problem</h2>
+
+<p>Your four VMs sit on a VirtualBox <strong>internal network</strong>
+(<code>intnet</code>), which is <code>10.0.0.0/24</code>. This is a
+deliberate and good choice: a VirtualBox internal network can talk to other VMs
+on the same internal network and to nothing else. No route to your home LAN, no
+route to the internet, no route to any real machine.</p>
+
+<p>WinServer and WindowsClient originally had a single network adapter on that
+internal network and nothing else. Which means:</p>
+
+<ul>
+  <li>They can talk to the manager at <code>10.0.0.40</code>. Good, that is the
+      path events travel.</li>
+  <li>They <strong>cannot reach the internet</strong>, so they cannot download
+      the Wazuh installer from <code>packages.wazuh.com</code>.</li>
+</ul>
+
+<div class="box b-warn">
+  <span class="bt">This bites almost everyone, and the symptom is confusing</span>
+  <p>The agent installer needs to come from somewhere. Without an internet route
+  the download silently hangs or fails, and people conclude the Wazuh site is
+  down. It is not. The VM simply has no route to the internet, by design.</p>
+</div>
+
+<h2>2.2 The change: a second adapter on NAT</h2>
+
+<p>The fix is one VirtualBox setting. Each Windows VM keeps its internal-network
+adapter exactly as it was, and gains a <strong>second</strong> adapter on NAT:</p>
+
+<pre><span class="cmt"># what the VMs look like now</span>
+WinServer      nic1 = intnet   <span class="out">10.0.0.50</span>   <span class="cmt">lab traffic, isolated</span>
+               nic2 = nat      <span class="out">10.0.2.15</span>   <span class="cmt">internet, via the host</span>
+
+WindowsClient  nic1 = intnet   <span class="out">10.0.0.x</span>    <span class="cmt">lab traffic, isolated</span>
+               nic2 = nat      <span class="out">10.0.2.15</span>   <span class="cmt">internet, via the host</span></pre>
+
+<p>Run this on the host, with each VM powered off:</p>
+
+<pre>VBoxManage modifyvm "WinServer"     --nic2 nat --nictype2 82540EM
+VBoxManage modifyvm "WindowsClient" --nic2 nat --nictype2 82540EM</pre>
+
+<p>To undo it later and return the lab to full isolation:</p>
+
+<pre>VBoxManage modifyvm "WinServer"     --nic2 none
+VBoxManage modifyvm "WindowsClient" --nic2 none</pre>
+
+<div class="box b-info">
+  <span class="bt">Why this does not weaken your lab</span>
+  <p>The lab segment is still fully isolated. NAT gives the VM a route out to
+  the internet through the host's connection; it does <strong>not</strong> give
+  anyone a route <em>into</em> <code>10.0.0.0/24</code>. Your Kali box still
+  cannot reach anything except the other lab machines. Attack tooling cannot
+  reach your real network through this.</p>
+  <p>The practical effect is narrow and specific: these two VMs can now download
+  software, and the agent reports to the manager over the same isolated path it
+  always would have. If you want zero internet route at all once the agent is
+  installed, set the second adapter back to <code>none</code> and the agent
+  keeps working, because it only ever needed the internet to fetch itself.</p>
+</div>
+
+<h2>2.3 How to confirm the change took</h2>
+
+<pre>VBoxManage showvminfo "WinServer" --machinereadable | findstr /B "nic"
+<span class="out">nic1="intnet"
+nic2="nat"</span></pre>
+
+<p>Inside the guest, you should see two adapters with different address ranges:</p>
+
+<pre>ipconfig /all
+<span class="out">Ethernet      ...  10.0.0.50    <- lab network, talks to the manager
+Ethernet 2    ...  10.0.2.15    <- NAT, internet</span></pre>
+
+<div class="box b-warn">
+  <span class="bt">This is the mistake to avoid</span>
+  <p>If a machine has two adapters, <strong>the first one is usually the one
+  Windows and the agent default to</strong>. Keep <code>10.0.0.x</code> as the
+  primary interface. If the agent somehow binds to <code>10.0.2.x</code> it
+  will try to reach the manager through NAT, fail, and you will spend an hour
+  debugging a firewall that is not the problem.</p>
+</div>
+
+<!-- ==================== 3 ==================== -->
+<h1 class="sec">3 &nbsp;The install script</h1>
+
+<p class="lead">You could copy a dozen commands by hand from the Wazuh docs. A
+script is better here for one reason: it tells you what it is doing at each
+step, and it fails loudly instead of silently.</p>
+
+<p>The script is <code>Install-WazuhAgent.ps1</code>, sitting next to this
+document. It does the whole job, prints what it is doing, and finishes with a
+verdict you can trust.</p>
+
+<h2>3.1 What it does, in order</h2>
+
+<table class="d">
+  <tr><th style="width:8%">#</th><th style="width:30%">Step</th><th>Why it is there</th></tr>
+  <tr><td class="c">1</td><td>Check it is elevated</td><td>Installing a service needs admin. Failing here with a clear message beats a confusing error three steps later.</td></tr>
+  <tr><td class="c">2</td><td>Show agent identity</td><td>So you can see the name, manager and group before anything is written to disk. Mistyped agent names are annoying to fix later.</td></tr>
+  <tr><td class="c">3</td><td>Test 1514 and 55000</td><td>Proves the path to the manager works <em>before</em> installing. An agent that cannot reach the manager installs fine and then reports nothing, which is a miserable thing to debug.</td></tr>
+  <tr><td class="c">4</td><td>Download the MSI</td><td>Uses the NAT adapter added above. Fails with an explanation if there is no internet route.</td></tr>
+  <tr><td class="c">5</td><td>Install silently</td><td>Writes a verbose MSI log so you can see exactly what happened if anything goes wrong.</td></tr>
+  <tr><td class="c">6</td><td>Start the service</td><td>Named <code>WazuhSvc</code>, and set to start automatically so it survives a reboot.</td></tr>
+  <tr><td class="c">7</td><td>Firewall rule</td><td>Inbound 1514 only, and only if it is not already there.</td></tr>
+  <tr><td class="c">8</td><td>Read the log</td><td>Confirms whether registration actually succeeded, and quotes the error if not.</td></tr>
+  <tr><td class="c">9</td><td>Show the config</td><td>Proves the manager IP and agent name landed in <code>ossec.conf</code> as you intended.</td></tr>
+</table>
+
+<h2>3.2 Running it on WinServer</h2>
+
+<p>Open an Administrator PowerShell on WinServer. If the script is on the host,
+put it on a VirtualBox shared folder, or copy it in. Then:</p>
+
+<pre>cd C:\Path\To\Script
+.\Install-WazuhAgent.ps1 -AgentName winsrv-01 -AgentGroup windows,servers</pre>
+
+<p>If PowerShell blocks the script because of execution policy:</p>
+
+<pre>powershell -ExecutionPolicy Bypass -File .\Install-WazuhAgent.ps1 `
+  -AgentName winsrv-01 -AgentGroup windows,servers</pre>
+
+<div class="box b-info">
+  <span class="bt">Why ExecutionPolicy Bypass is acceptable here, and only here</span>
+  <p>Execution policy is a safety net against running scripts you did not
+  inspect. You are inspecting it, it is sitting on your own disk, and
+  <code>Bypass</code> applies only to that one process. Do not set the machine
+  policy to <code>Unrestricted</code>, and do not paste this into a shared
+  profile.</p>
+</div>
+
+<h2>3.3 Running it on WindowsClient</h2>
+
+<p>Same script, different name and group:</p>
+
+<pre>powershell -ExecutionPolicy Bypass -File .\Install-WazuhAgent.ps1 `
+  -AgentName wincli-01 -AgentGroup windows,endpoints</pre>
+
+<table class="d">
+  <tr><th style="width:22%">Parameter</th><th style="width:30%">Use</th><th>Notes</th></tr>
+  <tr><td class="mono">-AgentName</td><td>Must be unique</td><td>Defaults to the hostname lowercased. Two agents with the same name is a real and confusing failure.</td></tr>
+  <tr><td class="mono">-AgentGroup</td><td>windows, servers / endpoints</td><td>Groups are <strong>enforced</strong> by the manager. They decide what configuration your agent receives.</td></tr>
+  <tr><td class="mono">-ManagerIP</td><td>Defaults to 10.0.0.40</td><td>Use the internal-network address, never the NAT one.</td></tr>
+  <tr><td class="mono">-SkipDownload</td><td>Reuse a local MSI</td><td>For when you have no internet route and sideloaded the file.</td></tr>
+  <tr><td class="mono">-RegistrationPassword</td><td>Only if you enabled key auth</td><td>Leave it out for the simple lab setup.</td></tr>
+</table>
+
+<div class="box b-warn">
+  <span class="bt">Groups versus tags &mdash; the classic beginner bug</span>
+  <p><strong>Groups</strong> are enforced by the manager: an agent's configuration
+  is assembled from the groups it belongs to. Use them for "everything in this
+  group gets this hardening". <strong>Tags</strong> are free-form metadata for
+  filtering and have no effect on configuration. Putting descriptive words in
+  the group field, or expecting a tag to change behaviour, is the most common
+  configuration mistake in a first SIEM lab.</p>
+</div>
+
+<h2>3.4 What success looks like</h2>
+
+<pre><span class="cmt">=== Checking administrator rights ===</span>
+  [OK]   Running elevated
+
+<span class="cmt">=== Testing the path to the manager ===</span>
+  [OK]   Port 1514 reachable at 10.0.0.40
+  [OK]   Port 55000 reachable at 10.0.0.40
+
+<span class="cmt">=== Installing silently ===</span>
+  [OK]   MSI returned 0 (success)
+
+<span class="cmt">=== Setting the service to start automatically ===</span>
+  [OK]   WazuhSvc is Running, start type Automatic
+
+<span class="out">  RESULT: agent is running and the manager is reachable.</span></pre>
+
+<!-- ==================== 4 ==================== -->
+<h1 class="sec">4 &nbsp;Confirming it on the manager</h1>
+
+<p class="lead">A green result in the terminal is necessary but not sufficient.
+The proof is on the manager.</p>
+
+<h2>4.1 The dashboard</h2>
+
+<p>Open the Wazuh dashboard from the manager VM. The host cannot reach
+<code>10.0.0.40</code> directly, so either use the SIEM's own IP through your
+browser if you have a port forward, or browse from inside the SIEM VM. Then
+go to <strong>Agents</strong>.</p>
+
+<table class="d">
+  <tr><th style="width:26%">You see</th><th>It means</th></tr>
+  <tr><td class="mono">Active, green</td><td>Working. This is the goal.</td></tr>
+  <tr><td class="mono">Never connected</td><td>Installed but could not reach the manager. Read the agent's own log.</td></tr>
+  <tr><td class="mono">Pending / Disconnected</td><td>Was connected, now is not. Common after the VM sleeps or the manager restarts.</td></tr>
+  <tr><td class="mono">Not listed at all</td><td>Did not enrol. Almost always port 55000 unreachable.</td></tr>
+</table>
+
+<h2>4.2 From the manager shell</h2>
+
+<p>On SIEM-Ubuntu, over SSH from Kali or a console:</p>
+
+<pre>ssh &lt;user&gt;@10.0.0.40
+sudo /var/ossec/bin/agent_control -l</pre>
+
+<pre><span class="out">ID: 1, Name: kali-linux-2026.2-virtualbox-amd64, Active
+ID: 2, Name: winsrv-01, Active
+ID: 3, Name: wincli-01, Active</span></pre>
+
+<p>Two more commands worth knowing, both on the manager:</p>
+
+<pre><span class="cmt"># force an agent to re-read its configuration</span>
+sudo /var/ossec/bin/agent_control -R 2
+sudo /var/ossec/bin/agent_control -i 2
+
+<span class="cmt"># see the last messages the agent sent</span>
+sudo /var/ossec/bin/agent_control -l 2</pre>
+
+<h2>4.3 Prove data is actually flowing</h2>
+
+<p>An agent can show Active while sending nothing useful. Generate a real event
+and go looking for it. On the target, create a file in a monitored directory,
+or simply try and fail a logon a few times:</p>
+
+<pre><span class="cmt"># on the target, generate a failed logon</span>
+runas /user:definitely-not-a-real-user cmd</pre>
+
+<p>Then in the dashboard, filter for it:</p>
+
+<pre>agent.name:winsrv-01 AND rule.level:&gt;=5</pre>
+
+<p>Or use the raw Windows event ID, which is the tool you will reach for most
+once Windows is enrolled:</p>
+
+<pre>data.win.system.eventID:4625</pre>
+
+<div class="box b-info">
+  <span class="bt">Event ID 4625 is worth memorising now</span>
+  <p>Failed logon. Its siblings, 4624 successful logon, 4648 logon with explicit
+  credentials, 4672 special privileges assigned, and 4720 account created, are
+  the backbone of Windows account-attack detection. Learn these five and you
+  can read a brute-force or lateral-movement attempt straight off the screen.</p>
+</div>
+
+<!-- ==================== 5 ==================== -->
+<h1 class="sec">5 &nbsp;What went wrong while building this, and what it taught me</h1>
+
+<p class="lead">These are real bugs hit while preparing this lab on a real
+machine. Every one of them is a mistake that is easy to make and hard to
+diagnose from the error message alone.</p>
+
+<h2>5.1 The service is called WazuhSvc, not Wazuh</h2>
+
+<p>Every piece of documentation, blog post and ChatGPT answer will tell you to
+run <code>Get-Service Wazuh</code>. On Windows, the service is registered as
+<strong><code>WazuhSvc</code></strong>, with display name <em>Wazuh</em>. The
+error you get is unhelpful:</p>
+
+<pre>Set-Service : Service 'Wazuh (WazuhSvc)' cannot be configured due to the
+following error: The specified service does not exist as an installed service.</pre>
+
+<p>Note what that message actually says: Wazuh <em>(WazuhSvc)</em>. It is telling
+you the answer in the error. Check the real name before you trust a guide:</p>
+
+<pre>Get-Service | Where-Object { $_.Name -match 'Wazuh|ossec' }
+<span class="out">Name      DisplayName  Status  StartType
+WazuhSvc  Wazuh        Running Automatic</span></pre>
+
+<h2>5.2 The log is ossec.log, not wazuh-agent.log</h2>
+
+<p>On Linux the agent log is <code>/var/ossec/logs/ossec.log</code> and many
+guides reference <code>wazuh-agent.log</code>. On Windows the file that actually
+exists is:</p>
+
+<pre>C:\Program Files (x86)\ossec-agent\ossec.log</pre>
+
+<p>Looking for the wrong filename makes a working agent look broken. This is
+worth internalising as a habit: when something does not behave, confirm the
+artifact exists before concluding the software is at fault.</p>
+
+<h2>5.3 $args is a reserved PowerShell variable</h2>
+
+<p>Building the <code>msiexec</code> argument list, the natural name is
+<code>$args</code>. That is an automatic variable in PowerShell and assigning to
+it silently breaks the call. The install produced no error and no log, and no
+service. Rename it:</p>
+
+<pre><span class="cmt"># wrong - silently does nothing useful</span>
+$args = @('/i', $msi, '/quiet', 'WAZUH_MANAGER=10.0.0.40')
+Start-Process msiexec.exe -ArgumentList $args -Wait
+
+<span class="cmt"># right</span>
+$msiArgs = @('/i', $msi, '/quiet', 'WAZUH_MANAGER=10.0.0.40')
+Start-Process msiexec.exe -ArgumentList $msiArgs -Wait -PassThru</pre>
+
+<h2>5.4 Check the real property names in the MSI</h2>
+
+<p>Rather than trusting documentation for the MSI property names, read them out
+of the installer itself. Decoding the file as Latin-1 and searching reveals
+exactly what it accepts:</p>
+
+<pre>python -c "
+import re,pathlib
+raw=pathlib.Path('wazuh-agent.msi').read_bytes().decode('latin1','ignore')
+for h in sorted(set(re.findall(r'WAZUH[A-Z_]{2,30}',raw))): print(h)"</pre>
+
+<pre><span class="out">WAZUH_MANAGER
+WAZUH_MANAGER_PORT
+WAZUH_REGISTRATION_SERVER
+WAZUH_REGISTRATION_PORT
+WAZUH_AGENT_NAME
+WAZUH_AGENT_GROUP
+WAZUH_REGISTRATION_PASSWORD
+WAZUH_REGISTRATION_CERTIFICATE
+WAZUH_REGISTRATION_CA
+WAZUH_REGISTRATION_KEY</span></pre>
+
+<p>That is the authoritative list. It also confirms that the modern, explicit
+form is <code>WAZUH_REGISTRATION_SERVER</code> and
+<code>WAZUH_REGISTRATION_PORT</code>, which is clearer than the older single
+<code>WAZUH_MANAGER</code> property.</p>
+
+<h2>5.5 Error 1208 means the enrolment port, not a broken agent</h2>
+
+<pre><span class="warnout">2026/09/30 23:12:38 wazuh-agent: ERROR: (1208):
+Unable to connect to enrollment service at '[10.0.0.40]:55000'</span></pre>
+
+<p>This is the error you will see if the manager is down, if 55000 is
+firewalled, or if the agent is pointed at the wrong address. It is not a
+corrupt installation. Check in this order:</p>
+
+<pre><span class="cmt"># 1. is the manager up?</span>
+sudo systemctl status wazuh-manager
+
+<span class="cmt"># 2. from the target, can you reach both ports?</span>
+Test-NetConnection -ComputerName 10.0.0.40 -Port 55000
+Test-NetConnection -ComputerName 10.0.0.40 -Port 1514
+
+<span class="cmt"># 3. is the agent pointing at the right address?</span>
+Get-Content "C:\Program Files (x86)\ossec-agent\ossec.conf" |
+  Select-String "&lt;address&gt;|&lt;port&gt;|agent_name"</pre>
+
+<h2>5.6 A note on testing installs on the wrong machine</h2>
+
+<p>While preparing this I test-installed the agent on my own Windows host to
+verify the script end to end, then removed it completely: uninstall via the
+product code, delete the leftover <code>ossec-agent</code> directory and the
+firewall rule, and confirm the service is gone.</p>
+
+<div class="box b-warn">
+  <span class="bt">Verify on a throwaway, not on the machine you work on</span>
+  <p>Test end-to-end runs of installer scripts on a disposable VM. An agent on
+  your daily machine ships its logs somewhere, adds a service, and opens a
+  firewall rule, and cleaning that up properly takes more care than installing
+  it did. If you must test on a real machine, record the product code before you
+  start so you can uninstall precisely rather than guessing.</p>
+</div>
+
+<!-- ==================== 6 ==================== -->
+<h1 class="sec">6 &nbsp;Configuring the SIEM, which is the real skill</h1>
+
+<p class="lead">Installing an agent is the easy part and honestly the least
+valuable. Configuring the manager to detect what matters is where the learning
+is.</p>
+
+<h2>6.1 Agent groups, in practice</h2>
+
+<p>Groups are how one manager serves different machines. Create them in the
+dashboard under <strong>Agents</strong> &rarr; <strong>Groups</strong>.</p>
+
+<table class="d">
+  <tr><th style="width:22%">Group</th><th style="width:30%">Members</th><th>Configuration it should carry</th></tr>
+  <tr><td class="mono">windows</td><td>all Windows agents</td><td>Baseline event channels: logon events, service changes, account management, Sysmon if present.</td></tr>
+  <tr><td class="mono">servers</td><td>winsrv-01</td><td>Stricter: monitor service and scheduled-task changes, SMB configuration, local administrator list.</td></tr>
+  <tr><td class="mono">endpoints</td><td>wincli-01</td><td>Endpoint-flavoured: USB device insertion, browser extensions, large outbound transfers.</td></tr>
+</table>
+
+<p>An agent in <code>windows,endpoints</code> receives the union of both groups'
+configuration. This is the first genuinely useful thing to get your hands on,
+because it is how a real shop manages a mixed estate without hand-editing every
+agent.</p>
+
+<h2>6.2 Turning on richer Windows telemetry</h2>
+
+<p>Stock Windows event channels are thin on process detail. Two cheap upgrades
+change what you can detect:</p>
+
+<h4>Sysmon</h4>
+
+<p>Microsoft's Sysinternals tool writes one consolidated log of process
+creation, network connections, and registry changes. Wazuh decodes it natively,
+so no custom parsing is needed.</p>
+
+<pre><span class="cmt"># download from the official Sysinternals site, then:</span>
+Expand-Archive .\Sysmon.zip -DestinationPath C:\Sysmon
+cd C:\Sysmon
+.\Sysmon64.exe -i          <span class="cmt"># install with default config</span>
+.\Sysmon64.exe -c          <span class="cmt"># check the active config</span></pre>
+
+<p>It is genuinely easy to flood with volume, so a minimal include list is
+usually better than the default:</p>
+
+<pre>&lt;Sysmon schemaversion="4.90"&gt;
+  &lt;EventFiltering&gt;
+    &lt;ProcessCreate onmatch="include"&gt;
+      &lt;Image condition="is not any C:\Windows\System32\svchost.exe"/&gt;
+    &lt;/ProcessCreate&gt;
+    &lt;NetworkConnect onmatch="include"&gt;
+      &lt;DestinationPort condition="is any 3389,445,5985,5986"/&gt;
+    &lt;/NetworkConnect&gt;
+    &lt;/EventFiltering&gt;
+&lt;/Sysmon&gt;</pre>
+
+<p>Those destination ports are the interesting ones for your lab: RDP, SMB, and
+WinRM are what lateral movement actually uses.</p>
+
+<div class="box b-warn">
+  <span class="bt">Sysmon events arrive in Wazuh as win_eventchannel</span>
+  <p>They are not a separate data source, so you filter them the same way:
+  <code>data.win.system.eventID:1</code> is process creation under Sysmon,
+  whereas the equivalent stock channel is 4688. Knowing which of the two is
+  feeding a rule is a question worth asking before you trust a detection.</p>
+</div>
+
+<h2>6.3 The three queries to learn first</h2>
+
+<p>The dashboard search bar accepts Lucene syntax. These three cover most of
+what a beginner needs:</p>
+
+<pre>rule.level:&gt;=10
+<span class="cmt"># high and critical only. your daily triage starting point.</span>
+
+rule.level:&gt;=8 AND agent.name:"winsrv-01"
+<span class="cmt"># high alerts on one machine. AND must be uppercase.</span>
+
+data.win.system.eventID:4625
+<span class="cmt"># failed logons. the brute-force detector.</span></pre>
+
+<h2>6.4 Turning detections into a red/blue loop</h2>
+
+<p>Now the interesting part. From Kali, generate activity, then go to the
+dashboard and find it. This is the exercise that teaches you the most.</p>
+
+<table class="d wrap">
+  <tr><th style="width:30%">From Kali, on 10.0.0.30</th><th style="width:26%">What you should see</th><th>The lesson</th></tr>
+  <tr><td class="mono">nmap -sV -p- --open 10.0.0.50</td><td>Port scan or service-detection alerts, moderate level</td><td>Scans are noisy but visible. If yours were silent, the firewall profile is hiding them.</td></tr>
+  <tr><td class="mono">crackmapexec smb 10.0.0.50 -u guest -p 'x'</td><td>Failed logons, 4625, authentication failures</td><td>Repeated failures are what turns noise into an alert. One is an event, fifty is an attack.</td></tr>
+  <tr><td class="mono">smbclient -L //10.0.0.50 -N</td><td>Share enumeration, possibly a rule about anonymous access</td><td>Null-session share listing should be blocked. If it works, that is a real finding.</td></tr>
+  <tr><td class="mono">Responder or a rogue SMB server</td><td>NTLM relay or hash-capture alerts, higher severity</td><td>Protocol downgrade and relay are among the most common real-world attacks.</td></tr>
+  <tr><td class="mono">winexe or PsExec to 10.0.0.50</td><td>Service creation event 7045, then process creation</td><td>Remote service installation is a loud, reliable signal. This is why it is a favourite technique.</td></tr>
+</table>
+
+<div class="box b-info">
+  <span class="bt">Do the loop in both directions</span>
+  <p>First, with the agent installed, confirm you can <em>see</em> the attack.
+  Then harden the target, run it again, and confirm the gap is <em>closed</em>
+  that you can no longer do it, or can do it but it is now detected. The second
+  half is the part that teaches security. Finding a gap is half a job; proving
+  the fix works is the other half, and it is the half people skip.</p>
+</div>
+
+<!-- ==================== 7 ==================== -->
+<h1 class="sec">7 &nbsp;Reference</h1>
+
+<h2>7.1 Quick command sheet</h2>
+
+<table class="d">
+  <tr><th style="width:46%">Task</th><th>Command</th></tr>
+  <tr><td class="mono">Is the agent running?</td><td class="mono">Get-Service WazuhSvc</td></tr>
+  <tr><td class="mono">Restart it</td><td class="mono">Restart-Service WazuhSvc</td></tr>
+  <tr><td class="mono">What is it configured with?</td><td class="mono">Get-Content "C:\Program Files (x86)\ossec-agent\ossec.conf" | Select-String "&lt;address&gt;|&lt;port&gt;|agent_name"</td></tr>
+  <tr><td class="mono">What is it doing?</td><td class="mono">Get-Content "C:\Program Files (x86)\ossec-agent\ossec.log" -Tail 30</td></tr>
+  <tr><td class="mono">Can it reach the manager?</td><td class="mono">Test-NetConnection 10.0.0.40 -Port 1514</td></tr>
+  <tr><td class="mono">Windows security events</td><td class="mono">Get-WinEvent -FilterHashtable @{LogName='Security'; Id=4625} -MaxEvents 5</td></tr>
+  <tr><td class="mono">Sysmon events</td><td class="mono">Get-WinEvent -LogName "Microsoft-Windows-Sysmon/Operational" -MaxEvents 5</td></tr>
+  <tr><td class="mono">Running processes with paths</td><td class="mono">Get-CimInstance Win32_Process | Select-Object ProcessId, Name, CommandLine</td></tr>
+  <tr><td class="mono">Listening ports and owners</td><td class="mono">Get-NetTCPConnection -State Listen | Select-Object LocalPort, OwningProcess</td></tr>
+  <tr><td class="mono">Local administrators</td><td class="mono">Get-LocalGroupMember Administrators</td></tr>
+  <tr><td class="mono">Uninstall completely</td><td class="mono">msiexec /x {840F372A-2C20-49B9-A164-D8A14E8E8D47} /quiet</td></tr>
+</table>
+
+<h2>7.2 Troubleshooting matrix</h2>
+
+<table class="d wrap">
+  <tr><th style="width:34%">Symptom</th><th style="width:24%">Most likely cause</th><th>Fix</th></tr>
+  <tr><td class="mono">Service 'Wazuh' does not exist</td><td>Wrong service name</td><td>It is <code>WazuhSvc</code>. Check with <code>Get-Service | ?{$_.Name -match 'Wazuh'}</code></td></tr>
+  <tr><td class="mono">MSI exits 0 but no service</td><td>Broken argument list</td><td>Do not name the variable <code>$args</code>. Check the verbose log at <code>%TEMP%\wazuh-msi.log</code></td></tr>
+  <tr><td class="mono">Error 1208 enrolment</td><td>55000 unreachable</td><td>Manager down, or blocked. Test the port from the target.</td></tr>
+  <tr><td class="mono">Install hangs on download</td><td>No internet route</td><td>Add the NAT adapter, or sideload the MSI and use <code>-SkipDownload</code></td></tr>
+  <tr><td class="mono">Never connected in dashboard</td><td>Wrong manager IP</td><td>Must be the internal-network address, never the NAT one.</td></tr>
+  <tr><td class="mono">Duplicate agent name</td><td>Two machines, same name</td><td>Names must be unique. Rename in the dashboard and reinstall.</td></tr>
+  <tr><td class="mono">Active but no alerts</td><td>Not enough data yet</td><td>Wait for the first FIM scan, or generate a test event and filter for it.</td></tr>
+  <tr><td class="mono">Config changes not applied</td><td>Agent has not re-read</td><td><code>agent_control -R &lt;id&gt;</code> then <code>-i &lt;id&gt;</code> on the manager.</td></tr>
+  <tr><td class="mono">Too many low-level alerts</td><td>Sysmon too broad</td><td>Trim the include list in the Sysmon config.</td></tr>
+</table>
+
+<h2>7.3 Vocabulary</h2>
+
+<table class="d">
+  <tr><th style="width:26%">Term</th><th>Meaning</th></tr>
+  <tr><td><strong>Manager</strong></td><td>The server that receives, stores and analyses everything. Your SIEM-Ubuntu.</td></tr>
+  <tr><td><strong>Agent</strong></td><td>The software on a monitored endpoint. This document installs these.</td></tr>
+  <tr><td><strong>Indexer</strong></td><td>The storage engine behind the manager, on port 9200. Do not expose it.</td></tr>
+  <tr><td><strong>Dashboard</strong></td><td>The web interface on port 443 where you read alerts.</td></tr>
+  <tr><td><strong>authd</strong></td><td>The enrolment service on port 55000 that hands agents their key.</td></tr>
+  <tr><td><strong>Enrolment</strong></td><td>First-time registration of an agent with the manager.</td></tr>
+  <tr><td><strong>Group</strong></td><td>A manager-enforced set of agents sharing configuration.</td></tr>
+  <tr><td><strong>Tag</strong></td><td>Free-form metadata for filtering. No effect on configuration.</td></tr>
+  <tr><td><strong>Rule</strong></td><td>A detection pattern. Produces an alert when it matches.</td></tr>
+  <tr><td><strong>Level</strong></td><td>Severity 0&ndash;15. Sort by it; 10 and above means investigate now.</td></tr>
+  <tr><td><strong>FIM</strong></td><td>File Integrity Monitoring. Detects changes to important files.</td></tr>
+  <tr><td><strong>SCA</strong></td><td>Security Configuration Assessment. Checks against CIS-style baselines.</td></tr>
+  <tr><td><strong>MITRE ATT&amp;CK</strong></td><td>The tactic and technique framework Wazuh tags alerts with.</td></tr>
+</table>
+
+<h2>7.4 The complete script, for reference</h2>
+
+<p>This is the whole of <code>Install-WazuhAgent.ps1</code> as it was tested.
+You do not need to read it to use it, but reading it is the fastest way to
+understand exactly what the install does, and it is worth copying into your own
+notes.</p>
+
+<pre>&lt;#
+    Install-WazuhAgent.ps1
+    One-file Wazuh agent installer for the red/blue lab.
+
+    Run this on the TARGET machine (WinServer 2022 or WindowsClient Win11)
+    from an Administrator PowerShell.
+
+    Examples:
+      .\Install-WazuhAgent.ps1 -AgentName winsrv-01 -AgentGroup windows,servers
+      .\Install-WazuhAgent.ps1 -AgentName wincli-01 -AgentGroup windows,endpoints
+
+    It does the whole job and then tells you whether it worked.
+<span class="cmt">#&gt;</span>
+
+[CmdletBinding()]
+param(
+    <span class="cmt"># Wazuh manager (your SIEM-Ubuntu VM) on the isolated lab network.</span>
+    [string]$ManagerIP = &#x27;10.0.0.40&#x27;,
+
+    <span class="cmt"># Agent name. Must be unique. Defaults to the machine hostname.</span>
+    [string]$AgentName,
+
+    <span class="cmt"># Groups. These are ENFORCED on the manager - they decide what config</span>
+    <span class="cmt"># your agent gets. Do not use them for descriptive tags.</span>
+    [string]$AgentGroup = &#x27;windows&#x27;,
+
+    [string]$MsiUrl = &#x27;https://packages.wazuh.com/4.x/windows/wazuh-agent-4.14.8-1.msi&#x27;,
+
+    <span class="cmt"># Registration port (authd) on the manager. The agent also needs 1514 for events.</span>
+    [int]$ManagerPort = 1514,
+    [int]$RegistrationPort = 55000,
+
+    <span class="cmt"># Optional: pre-shared key, if you have enabled API key auth on the manager.</span>
+    <span class="cmt"># Leave empty for the simple, recommended lab setup.</span>
+    [string]$RegistrationPassword,
+
+    <span class="cmt"># Set -SkipDownload if you already copied the MSI onto the machine.</span>
+    [switch]$SkipDownload
+)
+
+$ErrorActionPreference = &#x27;Stop&#x27;
+
+function Write-Step  { param($m) Write-Host &quot;<span class="prm">`n</span>=== $m ===&quot; -ForegroundColor Cyan }
+function <span class="out">Write-Ok</span>    { param($m) Write-Host &quot;  [OK]   $m&quot; -ForegroundColor Green }
+function <span class="erro">Write-Bad</span>   { param($m) Write-Host &quot;  [FAIL] $m&quot; -ForegroundColor Red }
+function Write-Info  { param($m) Write-Host &quot;  [info] $m&quot; -ForegroundColor Gray }
+
+<span class="cmt"># ---------------------------------------------------------------- 0. admin</span>
+Write-Step &#x27;Checking administrator rights&#x27;
+$isAdmin = ([Security.Principal.WindowsPrincipal] <span class="prm">`</span>
+    [Security.Principal.WindowsIdentity]::GetCurrent()
+    ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+
+if (-not $isAdmin) {
+    <span class="erro">Write-Bad</span> &#x27;This script must run as Administrator.&#x27;
+    Write-Info &#x27;Right-click PowerShell -&gt; Run as administrator, then run it again.&#x27;
+    <span class="erro">exit 1</span>
+}
+<span class="out">Write-Ok</span> &#x27;Running elevated&#x27;
+
+<span class="cmt"># ------------------------------------------------- 1. name and local identity</span>
+if (-not $AgentName) { $AgentName = $env:COMPUTERNAME.ToLower() }
+Write-Step &#x27;Agent identity&#x27;
+Write-Info &quot;Agent name : $AgentName&quot;
+Write-Info &quot;Manager     : $ManagerIP&quot;
+Write-Info &quot;Group(s)    : $AgentGroup&quot;
+
+$ip = Get-NetIPAddress -AddressFamily IPv4 |
+      Where-Object { $_.IPAddress -notlike &#x27;127.*&#x27; -and
+                     $_.IPAddress -notlike &#x27;169.254.*&#x27; } |
+      Select-Object -First 1
+if ($ip) { Write-Info &quot;This host   : $($ip.IPAddress) on $($ip.InterfaceAlias)&quot; }
+
+<span class="cmt"># ------------------------------------------------- 2. can we reach the manager?</span>
+Write-Step &#x27;Testing the path to the manager&#x27;
+foreach ($port in @($ManagerPort, $RegistrationPort)) {
+    $t = Test-NetConnection -ComputerName $ManagerIP -Port $port -WarningAction SilentlyContinue
+    if ($t.TcpTestSucceeded) { <span class="out">Write-Ok</span> &quot;Port $port reachable at $ManagerIP&quot; }
+    else {
+        <span class="erro">Write-Bad</span> &quot;Cannot reach $ManagerIP<span class="prm">`</span>:$port&quot;
+        Write-Info &quot;The agent needs $ManagerPort (events) and $RegistrationPort (enrolment).&quot;
+        Write-Info &#x27;On the manager, both are opened by the Wazuh service itself.&#x27;
+    }
+}
+
+<span class="cmt"># --------------------------------------------------------- 3. download the MSI</span>
+$msi = Join-Path $env:TEMP &#x27;wazuh-agent.msi&#x27;
+
+if ($SkipDownload) {
+    Write-Step &#x27;Skipping download&#x27;
+} else {
+    Write-Step &#x27;Downloading the Wazuh agent&#x27;
+    Write-Info $MsiUrl
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        Invoke-WebRequest -Uri $MsiUrl -OutFile $msi -UseBasicParsing
+        $kb = [math]::Round((Get-Item $msi).Length / 1KB)
+        <span class="out">Write-Ok</span> &quot;Downloaded ($kb KB) -&gt; $msi&quot;
+    } catch {
+        <span class="erro">Write-Bad</span> &quot;Download failed: $($_.Exception.Message)&quot;
+        Write-Info &#x27;No internet on this NIC? Copy the MSI across manually and re-run with -SkipDownload&#x27;
+        <span class="erro">exit 1</span>
+    }
+}
+
+<span class="cmt"># ------------------------------------------------------------ 4. install it</span>
+Write-Step &#x27;Installing silently&#x27;
+Write-Info &#x27;This takes 30-60 seconds.&#x27;
+
+$log = Join-Path $env:TEMP &#x27;wazuh-msi.log&#x27;
+<span class="cmt"># NOTE: do not name this $args - that is a PowerShell automatic variable.</span>
+$msiArgs = @(
+    &#x27;/i&#x27;, $msi, &#x27;/quiet&#x27;, &#x27;/norestart&#x27;, &#x27;/l*v&#x27;, $log,
+    &quot;WAZUH_MANAGER=$ManagerIP&quot;,
+    &quot;WAZUH_MANAGER_PORT=$ManagerPort&quot;,
+    &quot;WAZUH_REGISTRATION_SERVER=$ManagerIP&quot;,
+    &quot;WAZUH_REGISTRATION_PORT=$RegistrationPort&quot;,
+    &quot;WAZUH_AGENT_NAME=$AgentName&quot;,
+    &quot;WAZUH_AGENT_GROUP=$AgentGroup&quot;
+)
+if ($RegistrationPassword) {
+    $msiArgs += &quot;WAZUH_REGISTRATION_PASSWORD=$RegistrationPassword&quot;
+}
+$p = Start-Process msiexec.exe -ArgumentList $msiArgs -Wait -PassThru
+
+switch ($p.ExitCode) {
+    0       { <span class="out">Write-Ok</span> &#x27;MSI returned 0 (success)&#x27; }
+    3010    { <span class="out">Write-Ok</span> &#x27;Installed, reboot required&#x27; }
+    1618    { <span class="erro">Write-Bad</span> &#x27;Another install is in progress. Reboot and retry.&#x27;; <span class="erro">exit 1</span> }
+    1638    { <span class="erro">Write-Bad</span> &#x27;A newer version is already installed.&#x27;; <span class="erro">exit 1</span> }
+    default { <span class="erro">Write-Bad</span> &quot;MSI failed, exit code $($p.ExitCode). Log: $log&quot;; <span class="erro">exit 1</span> }
+}
+
+<span class="cmt"># --------------------------------------------- 5. service auto-start + running</span>
+<span class="cmt"># NOTE: the service is called WazuhSvc, NOT &quot;Wazuh&quot;. Getting this name wrong</span>
+<span class="cmt"># is the single most common failure when scripting the Wazuh agent on Windows.</span>
+Write-Step &#x27;Setting the service to start automatically&#x27;
+$svc = Get-Service -Name &#x27;WazuhSvc&#x27; -ErrorAction SilentlyContinue
+if (-not $svc) {
+    <span class="erro">Write-Bad</span> &#x27;Service &quot;WazuhSvc&quot; not found after install. Check the MSI log.&#x27;
+    <span class="erro">exit 1</span>
+}
+Set-Service -Name &#x27;WazuhSvc&#x27; -StartupType Automatic
+Start-Service -Name &#x27;WazuhSvc&#x27;
+Start-Sleep -Seconds 5
+$svc = Get-Service -Name &#x27;WazuhSvc&#x27;
+if ($svc.Status -eq &#x27;Running&#x27;) { <span class="out">Write-Ok</span> &quot;WazuhSvc is $($svc.Status), start type $($svc.StartType)&quot; }
+else { <span class="erro">Write-Bad</span> &quot;WazuhSvc is $($svc.Status)&quot; }
+
+<span class="cmt"># ---------------------------------------------------------- 6. firewall rule</span>
+Write-Step &#x27;Opening the firewall for the agent&#x27;
+$existing = Get-NetFirewallRule -DisplayName &#x27;Wazuh Agent 1514&#x27; -ErrorAction SilentlyContinue
+if ($existing) {
+    <span class="out">Write-Ok</span> &#x27;Rule already present&#x27;
+} else {
+    New-NetFirewallRule -DisplayName &#x27;Wazuh Agent 1514&#x27; <span class="prm">`</span>
+        -Direction Inbound -Action Allow -Protocol TCP <span class="prm">`</span>
+        -LocalPort 1514 -Profile Any | Out-Null
+    <span class="out">Write-Ok</span> &#x27;Created inbound rule on TCP 1514&#x27;
+}
+
+<span class="cmt"># ------------------------------------------------------ 7. verify registration</span>
+<span class="cmt"># The agent writes to ossec.log, NOT wazuh-agent.log. The latter only appears</span>
+<span class="cmt"># on Linux. Looking for the wrong file is why &quot;I can&#x27;t see the log&quot; is common.</span>
+Write-Step &#x27;Reading the agent log for registration&#x27;
+$agentLog = &#x27;C:\Program Files (x86)\ossec-agent\ossec.log&#x27;
+
+Start-Sleep -Seconds 12
+if (Test-Path $agentLog) {
+    $tail = Get-Content $agentLog -Tail 40
+
+    $registered = $tail | Select-String &#x27;Enrolled new agent|Registered successfully|Valid registration&#x27;
+    if ($registered) {
+        $registered | Select-Object -Last 3 | ForEach-Object { <span class="out">Write-Ok</span> $_.Line.Trim() }
+    } else {
+        Write-Info &#x27;No successful registration line yet.&#x27;
+    }
+
+    if ($tail | Select-String &#x27;ERROR&#x27;) {
+        <span class="erro">Write-Bad</span> &#x27;Errors in the log:&#x27;
+        ($tail | Select-String &#x27;ERROR&#x27;) | Select-Object -Last 5 |
+            ForEach-Object { Write-Info $_.Line.Trim() }
+        Write-Info &#x27;Error 1208 = cannot reach the enrolment service on 55000.&#x27;
+        Write-Info &#x27;That is almost always the manager being down, or a firewall in the way.&#x27;
+    }
+} else {
+    Write-Info &quot;Log not found yet at $agentLog&quot;
+}
+
+<span class="cmt"># --------------------------------------------------------- 8. configuration</span>
+<span class="cmt"># The real settings live in ossec.conf (wazuh-agent.conf is for</span>
+<span class="cmt"># osquery.conf-style local overrides and is usually not what you want to read).</span>
+Write-Step &#x27;What the agent is actually configured with&#x27;
+$conf = &#x27;C:\Program Files (x86)\ossec-agent\ossec.conf&#x27;
+if (Test-Path $conf) {
+    Get-Content $conf | Select-String &#x27;&lt;server&gt;|&lt;address&gt;|&lt;port&gt;|&lt;agent_name&gt;|&lt;labels&gt;&#x27; |
+        Select-Object -First 10 | ForEach-Object { Write-Info $_.Line.Trim() }
+} else {
+    Write-Info &quot;Config not found at $conf&quot;
+}
+
+<span class="cmt"># ------------------------------------------------------------------ summary</span>
+Write-Step &#x27;Summary&#x27;
+$final = Test-NetConnection -ComputerName $ManagerIP -Port $ManagerPort -WarningAction SilentlyContinue
+$svc = Get-Service -Name &#x27;WazuhSvc&#x27;
+
+Write-Host &quot;&quot;
+Write-Host &quot;  Agent name : $AgentName&quot; -ForegroundColor White
+Write-Host &quot;  Service    : $($svc.Status) / $($svc.StartType)&quot; -ForegroundColor White
+Write-Host &quot;  Manager    : $ManagerIP (port $ManagerPort reachable: $($final.TcpTestSucceeded))&quot; -ForegroundColor White
+Write-Host &quot;  Installed  : $((Get-Item $msi -ErrorAction SilentlyContinue).LastWriteTime)&quot; -ForegroundColor Gray
+Write-Host &quot;&quot;
+
+if ($svc.Status -eq &#x27;Running&#x27; -and $final.TcpTestSucceeded) {
+    Write-Host &#x27;  RESULT: agent is running and the manager is reachable.&#x27; -ForegroundColor Green
+    Write-Host &#x27;  Next: open the Wazuh dashboard -&gt; Agents. This machine should turn Active&#x27; -ForegroundColor Green
+    Write-Host &quot;  within about 30 seconds. Look for &#x27;$AgentName&#x27;.&quot; -ForegroundColor Green
+} else {
+    Write-Host &#x27;  RESULT: something is not right yet. See the [FAIL] lines above.&#x27; -ForegroundColor Red
+    Write-Host &#x27;  Most common cause: wrong ManagerIP, or the manager is not running.&#x27; -ForegroundColor Red
+}
+
+Write-Host &quot;&quot;
+Write-Host &#x27;  Local log to watch: &#x27; -NoNewline
+Write-Host &#x27;C:\Program Files (x86)\ossec-agent\ossec.log&#x27; -ForegroundColor Cyan
+Write-Host &#x27;  (ossec.log, not wazuh-agent.log - that filename is Linux-only)&#x27; -ForegroundColor DarkGray
+Write-Host &#x27;&#x27;</pre>
+
+<h2>7.5 Where to go next</h2>
+
+<ul>
+  <li>Your <strong>Volume 2</strong> guide covers WinServer hardening. Every
+      control it configures will now generate evidence in the dashboard, which
+      makes it far more useful to work through.</li>
+  <li>Your <strong>Volume 1</strong> guide explains the dashboard, filtering and
+      the rule taxonomy. Read it before you start triaging, so the columns mean
+      something to you.</li>
+  <li>Add <strong>Sysmon</strong> next. It is the single biggest detection
+      improvement per minute of effort.</li>
+  <li>Then build the attack loop from section 6.4, and harden against what you
+      find.</li>
+</ul>
+
+<div class="box b-info">
+  <span class="bt">A closing note on where to point this</span>
+  <p>Everything above runs against VirtualBox VMs on your own laptop, on a
+  segment with no route to or from anything real. That is the right place to
+  practise offensive technique, and the reason it is worth keeping isolated.
+  Scanning, credential testing and exploitation against machines you do not own
+  is a different activity governed by law that varies by country, and consent
+  that is not implied by a machine being reachable. The skills transfer
+  completely; the target has to be yours.</p>
+</div>
+
+<p class="center" style="margin-top:8mm; color:var(--muted); font-size:9pt">
+End of document &middot; Red/Blue Lab, Volume 3
+</p>
+
+</body>
+</html>

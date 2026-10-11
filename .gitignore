@@ -1,0 +1,13 @@
+# OS / editor cruft
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# Scratch output from build_pdfs.py (headless-Edge render + profile)
+_render_*.html
+edge-pdf-profile/
