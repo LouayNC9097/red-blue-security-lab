@@ -107,14 +107,21 @@ Keep it on the lab bench. The skill is identical on both sides of the law — on
   └──────────────────────────────────────────────────────────────────┘
 ```
 
-### Host inventory
+### Machines at a glance
 
-| Machine | Role | Lab IP (`intnet`) | NAT IP | RAM | OS |
-|---|---|---|---|---|---|
-| **SIEM-Ubuntu** | Wazuh server (manager, indexer, dashboard, filebeat) | `10.0.0.40` | `10.0.3.15` | 8 GB | Ubuntu 26.04.1 LTS |
-| **Kali** | Attacker / assessment host | `10.0.0.30` | `10.0.3.20` | 4 GB | Kali Linux 2026.2 |
-| **WinServer** | Domain Controller (`corp.local`) — the target | `10.0.0.10` | — | 4 GB | Windows Server 2022 (build 20348.587) |
-| **WindowsClient** | Workstation endpoint | `10.0.0.50` | — | — | Windows 11 |
+The lab is **fully virtualised**. The Windows 11 host runs VirtualBox and nothing else security-related; **every lab component — including the Wazuh SIEM — runs inside its own guest VM.**
+
+> **Wazuh is installed on the dedicated `SIEM-Ubuntu` server (Ubuntu 26.04.1 LTS), not on the local (host) machine.** All four services — manager, indexer, dashboard, and filebeat — run on that one **Ubuntu Server VM** at `10.0.0.40`. The Windows host only runs the hypervisor and reaches the dashboard through a NAT port-forward (`https://127.0.0.1:4433`).
+
+| Machine | Type | Role | OS (version / build) | Lab IP (`intnet`) | NAT IP | vCPU | RAM | Wazuh agent ID |
+|---|---|---|---|---|---|---|---|---|
+| **SIEM-Ubuntu** | Ubuntu Server VM | **Wazuh SIEM server** — manager, indexer, dashboard, filebeat | Ubuntu 26.04.1 LTS | `10.0.0.40` | `10.0.3.15` | 4 | 8 GB | *server* |
+| **Kali** | Linux VM | Attacker / assessment host | Kali Linux 2026.2 | `10.0.0.30` | `10.0.3.20` | — | 4 GB | `001` (`kali`) |
+| **WinServer** | Windows VM | Domain Controller, `corp.local` — the target | Windows Server 2022 — build 20348.587 | `10.0.0.10` | — | — | 4 GB | `002` (`SERVER`) |
+| **WindowsClient** | Windows VM | Workstation endpoint | Windows 11 | `10.0.0.50` | — | — | — | `wincli-01` |
+| *Host* | Physical | Runs **VirtualBox 7.2.12 (r174389)** only | Windows 11 | — | — | — | — | — |
+
+> A `—` means the value is not fixed in the lab (default/inherited). Only the SIEM-Ubuntu sizing is specified in the build docs (4 vCPU / 8 GB); the other guests run comfortably on the RAM listed.
 
 > **Note on addressing:** early build volumes (agent install / hardening) placed WinServer at `10.0.0.50` as a member server. The red/blue campaign promotes it to the Domain Controller at `10.0.0.10` with domain `corp.local`. Both states are documented; use whichever matches your snapshot.
 
